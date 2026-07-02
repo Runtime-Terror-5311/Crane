@@ -1,0 +1,6 @@
+{
+  "name": "ESP32 Crane Monitor",
+  "description": "A MERN-stack telemetry dashboard to monitor real-time crane data from ESP32 with MongoDB persistence.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
