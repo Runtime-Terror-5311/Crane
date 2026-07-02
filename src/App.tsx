@@ -54,6 +54,13 @@ const getLocalDateString = (dateObj: Date) => {
   return `${year}-${month}-${day}`;
 };
 
+const getCraneLimits = (craneId: string) => {
+  if (craneId === "D4") {
+    return { mainLimit: 63000, auxLimit: 10000 };
+  }
+  return { mainLimit: 73000, auxLimit: 73000 };
+};
+
 export default function App() {
   // Telemetry list
   const [telemetry, setTelemetry] = useState<CraneTelemetry[]>([]);
@@ -539,21 +546,27 @@ export default function App() {
           }
         }
 
-        const overloadedCranes = Object.values(latestPacketsByCrane).filter(t => 
-          (t.mainWeight ?? 0) > 73000 || (t.auxWeight ?? 0) > 73000
-        );
+        const overloadedCranes = Object.values(latestPacketsByCrane).filter(t => {
+          const { mainLimit, auxLimit } = getCraneLimits(t.craneId);
+          return (t.mainWeight ?? 0) > mainLimit || (t.auxWeight ?? 0) > auxLimit;
+        });
 
         if (overloadedCranes.length === 0) return null;
         
         // Sort by timestamp descending
         overloadedCranes.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
         const latestOverload = overloadedCranes[0];
+        const { mainLimit, auxLimit } = getCraneLimits(latestOverload.craneId);
         const exceedingWeight = Math.max(latestOverload.mainWeight ?? 0, latestOverload.auxWeight ?? 0);
+        const isMainOverload = (latestOverload.mainWeight ?? 0) > mainLimit;
+        const activeLimit = isMainOverload ? mainLimit : auxLimit;
+        const hoistType = isMainOverload ? "Main Hoist" : "Aux Hoist";
+
         return (
           <div className="bg-red-600 border-b border-red-500 text-white px-6 py-3 text-xs font-bold flex items-center gap-3 animate-pulse shadow-lg shrink-0">
             <AlertCircle className="w-5 h-5 shrink-0 text-white animate-bounce" />
             <div className="flex-1">
-              <span className="uppercase tracking-wider font-black">CRITICAL CAPACITY OVERLOAD ALERT:</span> Crane <span className="underline font-mono">{latestOverload.craneId}</span> has exceeded safety limit of 73,000 kg! Measured Load: <span className="font-mono text-sm underline">{exceedingWeight.toLocaleString()} kg</span>.
+              <span className="uppercase tracking-wider font-black">CRITICAL CAPACITY OVERLOAD ALERT:</span> Crane <span className="underline font-mono">{latestOverload.craneId}</span> has exceeded {hoistType} safety limit of {activeLimit.toLocaleString()} kg! Measured Load: <span className="font-mono text-sm underline">{exceedingWeight.toLocaleString()} kg</span>.
             </div>
             <span className="text-[10px] bg-red-800 px-2 py-0.5 rounded font-mono font-bold">
               {new Date(latestOverload.timestamp).toLocaleTimeString()}
@@ -821,7 +834,8 @@ export default function App() {
 
                           // Display badges for states
                           let stateBadgeClass = "bg-slate-900 text-slate-400 border border-slate-800";
-                          const isOverloaded = (item.mainWeight ?? 0) > 73000 || (item.auxWeight ?? 0) > 73000;
+                          const { mainLimit: itemMainLimit, auxLimit: itemAuxLimit } = getCraneLimits(item.craneId);
+                          const isOverloaded = (item.mainWeight ?? 0) > itemMainLimit || (item.auxWeight ?? 0) > itemAuxLimit;
                           
                           if (item.state === "OVERLOAD" || isOverloaded) {
                             stateBadgeClass = "bg-red-950 text-red-400 border border-red-800 font-extrabold animate-pulse";

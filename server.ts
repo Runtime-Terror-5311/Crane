@@ -202,7 +202,10 @@ async function processTelemetryAndStats(data: any) {
 
   // 1. Calculate crane state based on weight and coordinates
   let state = "IDLE";
-  if (mainWeight > 73000.0 || auxWeight > 73000.0) {
+  const mainLimit = (craneId === "D4") ? 63000.0 : 73000.0;
+  const auxLimit = (craneId === "D4") ? 10000.0 : 73000.0;
+
+  if (mainWeight > mainLimit || auxWeight > auxLimit) {
     state = "OVERLOAD";
   } else if (mainWeight > 50.0 || auxWeight > 50.0 || ct > 0 || lt > 0 || mh > 0 || ah > 0) {
     state = "OPERATING";
