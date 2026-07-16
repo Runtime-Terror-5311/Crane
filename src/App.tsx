@@ -61,6 +61,26 @@ const getCraneLimits = (craneId: string) => {
   return { mainLimit: 73000, auxLimit: 73000 };
 };
 
+const fetchJsonWithRetry = async (url: string, options?: RequestInit, retries = 5, delay = 1000): Promise<any> => {
+  try {
+    const response = await fetch(url, options);
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    const contentType = response.headers.get("content-type") || "";
+    if (!contentType.includes("application/json")) {
+      throw new Error("Server response is not valid JSON.");
+    }
+    return await response.json();
+  } catch (error: any) {
+    if (retries > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      return fetchJsonWithRetry(url, options, retries - 1, delay * 1.5);
+    }
+    throw error;
+  }
+};
+
 export default function App() {
   // Telemetry list
   const [telemetry, setTelemetry] = useState<CraneTelemetry[]>([]);
@@ -76,6 +96,11 @@ export default function App() {
   const [selectedDate, setSelectedDate] = useState<string>(() => {
     return getLocalDateString(new Date());
   });
+  
+  const selectedDateRef = useRef(selectedDate);
+  useEffect(() => {
+    selectedDateRef.current = selectedDate;
+  }, [selectedDate]);
   
   // Table view filter states
   const [displayLimit, setDisplayLimit] = useState<number>(100);
@@ -113,14 +138,12 @@ export default function App() {
     if (!silent) setLoading(true);
     try {
       const url = dateToFetch ? `/api/crane?date=${dateToFetch}` : "/api/crane";
-      const response = await fetch(url);
-      if (!response.ok) throw new Error("Failed to fetch logs");
-      const data = await response.json();
+      const data = await fetchJsonWithRetry(url, {}, 5, 1000);
       setTelemetry(data);
       setError(null);
     } catch (err: any) {
-      console.error(err);
-      setError("Unable to reach the backend telemetry server.");
+      console.warn("Telemetry fetch failed after retries:", err);
+      setError("Unable to reach the backend telemetry server. Please make sure the server is starting up correctly.");
     } finally {
       if (!silent) setLoading(false);
     }
@@ -129,26 +152,20 @@ export default function App() {
   // Fetch config details
   const fetchConfig = async () => {
     try {
-      const response = await fetch("/api/config");
-      if (response.ok) {
-        const data = await response.json();
-        setConfig(data);
-      }
+      const data = await fetchJsonWithRetry("/api/config", {}, 5, 1000);
+      setConfig(data);
     } catch (err) {
-      console.error("Failed to load server configuration details.", err);
+      console.warn("Failed to load server configuration details after retries:", err);
     }
   };
 
   // Fetch cumulative stats
   const fetchStats = async () => {
     try {
-      const response = await fetch("/api/crane/stats");
-      if (response.ok) {
-        const data = await response.json();
-        setCraneStats(data);
-      }
-    } catch (err) {
-      console.error("Failed to fetch fleet stats.", err);
+      const data = await fetchJsonWithRetry("/api/crane/stats", {}, 5, 1000);
+      setCraneStats(data);
+    } catch (err: any) {
+      console.warn("Failed to fetch fleet stats after retries:", err);
     }
   };
 
@@ -161,21 +178,16 @@ export default function App() {
     const initTelemetry = async () => {
       try {
         setLoading(true);
-        const response = await fetch("/api/crane");
-        if (response.ok) {
-          const data = await response.json();
-          if (data && data.length > 0) {
-            const latestDate = getLocalDateString(new Date(data[0].timestamp));
-            setSelectedDate(latestDate);
-          } else {
-            fetchLogs(false, selectedDate);
-          }
+        const data = await fetchJsonWithRetry("/api/crane", {}, 5, 1000);
+        if (data && data.length > 0) {
+          const latestDate = getLocalDateString(new Date(data[0].timestamp));
+          setSelectedDate(latestDate);
         } else {
-          fetchLogs(false, selectedDate);
+          await fetchLogs(false, selectedDate);
         }
       } catch (err) {
-        console.error("Initial telemetry load failed, falling back to today", err);
-        fetchLogs(false, selectedDate);
+        console.warn("Initial telemetry load failed after retries, falling back to today", err);
+        await fetchLogs(false, selectedDate);
       } finally {
         setLoading(false);
       }
@@ -211,22 +223,34 @@ export default function App() {
     socket.on("telemetry_update", (message: { data: CraneTelemetry; stats?: CraneStats[] }) => {
       const newTelemetry = message.data;
       const packetDateStr = getLocalDateString(new Date(newTelemetry.timestamp));
+      const currentSelectedDate = selectedDateRef.current;
 
-      setTelemetry((prev) => {
-        // Prevent duplicates
-        if (prev.some(t => t.timestamp === newTelemetry.timestamp && t.craneId === newTelemetry.craneId)) {
-          return prev;
-        }
-        
-        // If the user is currently viewing a specific date, and the incoming packet is not for that date,
-        // do not add it to the active telemetry dataset.
-        if (selectedDate && packetDateStr !== selectedDate) {
-          return prev;
-        }
+      if (currentSelectedDate && packetDateStr > currentSelectedDate) {
+        // Auto-switch to the new date so we can see the live incoming stream
+        setSelectedDate(packetDateStr);
+        setTelemetry((prev) => {
+          if (prev.some(t => t.timestamp === newTelemetry.timestamp && t.craneId === newTelemetry.craneId)) {
+            return prev;
+          }
+          return [newTelemetry, ...prev];
+        });
+      } else {
+        setTelemetry((prev) => {
+          // Prevent duplicates
+          if (prev.some(t => t.timestamp === newTelemetry.timestamp && t.craneId === newTelemetry.craneId)) {
+            return prev;
+          }
+          
+          // If the user is currently viewing a specific date, and the incoming packet is not for that date,
+          // do not add it to the active telemetry dataset.
+          if (currentSelectedDate && packetDateStr !== currentSelectedDate) {
+            return prev;
+          }
 
-        const updated = [newTelemetry, ...prev];
-        return updated; // Do not slice here to keep complete metrics for the day
-      });
+          const updated = [newTelemetry, ...prev];
+          return updated; // Do not slice here to keep complete metrics for the day
+        });
+      }
 
       if (message.stats) {
         setCraneStats(message.stats);
@@ -265,9 +289,25 @@ export default function App() {
   useEffect(() => {
     let pollTimer: NodeJS.Timeout | null = null;
     if (!wsConnected && selectedDate) {
-      pollTimer = setInterval(() => {
-        fetchLogs(true, selectedDate);
-        fetchStats();
+      pollTimer = setInterval(async () => {
+        try {
+          // 1. Check if there's any newer telemetry in the database first (e.g. uploaded via REST or LoRa)
+          const latestData = await fetchJsonWithRetry("/api/crane?limit=1", {}, 1, 500);
+          if (latestData && latestData.length > 0) {
+            const latestDateInDb = getLocalDateString(new Date(latestData[0].timestamp));
+            if (latestDateInDb > selectedDate) {
+              // A newer date has been uploaded! Switch to it.
+              setSelectedDate(latestDateInDb);
+              return; // The selectedDate change will trigger fetchLogs for the new date automatically
+            }
+          }
+          
+          // 2. Standard polling updates for the currently selected date
+          await fetchLogs(true, selectedDate);
+          await fetchStats();
+        } catch (err) {
+          console.warn("Polling interval failed to refresh telemetry:", err);
+        }
       }, 4000);
     }
     return () => {
@@ -306,6 +346,20 @@ export default function App() {
       if (response.ok) {
         setTestSendSuccess(true);
         setTimeout(() => setTestSendSuccess(false), 3000);
+
+        const resData = await response.json().catch(() => ({}));
+        if (resData && resData.data && resData.data.timestamp) {
+          const newPacketDate = getLocalDateString(new Date(resData.data.timestamp));
+          if (newPacketDate > selectedDate) {
+            setSelectedDate(newPacketDate);
+          } else {
+            await fetchLogs(true, selectedDate);
+            await fetchStats();
+          }
+        } else {
+          await fetchLogs(true, selectedDate);
+          await fetchStats();
+        }
       } else {
         const errData = await response.json().catch(() => ({}));
         setActionError(errData.error || "Server returned error when processing simulation packet.");
@@ -433,7 +487,7 @@ export default function App() {
 
       const mainWeight = item.mainWeight ?? 0;
       const auxWeight = item.auxWeight ?? 0;
-      const hasLoad = mainWeight > 50 || auxWeight > 50;
+      const hasLoad = mainWeight > 10 || auxWeight > 10;
       const isMoving = (item.lt ?? 0) > 0 || (item.ct ?? 0) > 0 || (item.mh ?? 0) > 0 || (item.ah ?? 0) > 0;
 
       if (isMoving && hasLoad) {
@@ -896,12 +950,12 @@ export default function App() {
                               </td>
 
                               {/* MHW (Main Hoist Weight) COLUMN */}
-                              <td className={`p-3 text-right font-bold whitespace-nowrap ${ (item.mainWeight ?? 0) > 73000 ? "text-red-400" : "text-emerald-400" }`}>
+                              <td className={`p-3 text-right font-bold whitespace-nowrap ${ (item.mainWeight ?? 0) > itemMainLimit ? "text-red-400" : "text-emerald-400" }`}>
                                 {item.mainWeight ?? 0} kg
                               </td>
 
                               {/* AHW (Aux Hoist Weight) COLUMN */}
-                              <td className={`p-3 text-right pr-4 font-bold whitespace-nowrap ${ (item.auxWeight ?? 0) > 73000 ? "text-red-400" : "text-emerald-400" }`}>
+                              <td className={`p-3 text-right pr-4 font-bold whitespace-nowrap ${ (item.auxWeight ?? 0) > itemAuxLimit ? "text-red-400" : "text-emerald-400" }`}>
                                 {item.auxWeight ?? 0} kg
                               </td>
                             </tr>
@@ -1242,10 +1296,13 @@ export default function App() {
                       Hoist Lifting Weight Profile & Thresholds
                     </h3>
                     <p className="text-[10px] text-slate-400 mt-1">
-                      Rolling real-time plot of hoist weights. Reference line marks D4 Crane Capacity (73,000 kg).
+                      Rolling real-time plot of hoist weights with crane-specific safety thresholds (D4: Main 63k / Aux 10k; Others: 73k).
                     </p>
                   </div>
-                  {telemetry.some(t => (t.mainWeight ?? 0) > 73000) && (
+                  {telemetry.some(t => {
+                    const { mainLimit, auxLimit } = getCraneLimits(t.craneId);
+                    return (t.mainWeight ?? 0) > mainLimit || (t.auxWeight ?? 0) > auxLimit;
+                  }) && (
                     <span className="bg-red-950 text-red-400 border border-red-800 text-[9px] px-2 py-0.5 rounded font-mono font-bold animate-pulse uppercase">
                       Overload Events Detected
                     </span>
@@ -1259,12 +1316,16 @@ export default function App() {
                         data={[...filteredTelemetry]
                           .slice(0, 40)
                           .reverse()
-                          .map(t => ({
-                            time: new Date(t.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }),
-                            mhw: t.mainWeight ?? 0,
-                            ahw: t.auxWeight ?? 0,
-                            limit: 73000
-                          }))}
+                          .map(t => {
+                            const { mainLimit, auxLimit } = getCraneLimits(t.craneId);
+                            return {
+                              time: new Date(t.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }),
+                              mhw: t.mainWeight ?? 0,
+                              ahw: t.auxWeight ?? 0,
+                              mainLimit,
+                              auxLimit
+                            };
+                          })}
                         margin={{ top: 10, right: 10, left: -10, bottom: 5 }}
                       >
                         <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
@@ -1279,7 +1340,8 @@ export default function App() {
                         <Legend verticalAlign="top" height={36} wrapperStyle={{ fontSize: '10px', fontFamily: 'monospace' }} />
                         <Line type="monotone" dataKey="mhw" name="Main Hoist Weight" stroke="#10b981" strokeWidth={2} dot={{ r: 2.5 }} activeDot={{ r: 5 }} />
                         <Line type="monotone" dataKey="ahw" name="Aux Hoist Weight" stroke="#38bdf8" strokeWidth={1} dot={{ r: 1.5 }} />
-                        <Line type="monotone" dataKey="limit" name="Capacity Safety Limit (73k)" stroke="#ef4444" strokeDasharray="5 5" strokeWidth={1.5} dot={false} activeDot={false} />
+                        <Line type="monotone" dataKey="mainLimit" name="Main Hoist Safety Limit" stroke="#ef4444" strokeDasharray="5 5" strokeWidth={1.5} dot={false} activeDot={false} />
+                        <Line type="monotone" dataKey="auxLimit" name="Aux Hoist Safety Limit" stroke="#f97316" strokeDasharray="3 3" strokeWidth={1.5} dot={false} activeDot={false} />
                       </LineChart>
                     </ResponsiveContainer>
                   ) : (
