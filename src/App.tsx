@@ -228,31 +228,18 @@ export default function App() {
       const packetDateStr = getLocalDateString(new Date(newTelemetry.timestamp));
       const currentSelectedDate = selectedDateRef.current;
 
-      if (currentSelectedDate && packetDateStr > currentSelectedDate) {
-        // Auto-switch to the new date so we can see the live incoming stream
+      // Auto-switch to the incoming packet's date so it immediately shows on the dashboard
+      if (currentSelectedDate && packetDateStr !== currentSelectedDate) {
         setSelectedDate(packetDateStr);
-        setTelemetry((prev) => {
-          if (prev.some(t => t.timestamp === newTelemetry.timestamp && t.craneId === newTelemetry.craneId)) {
-            return prev;
-          }
-          return [newTelemetry, ...prev];
-        });
-      } else {
-        setTelemetry((prev) => {
-          // Prevent duplicates
-          if (prev.some(t => t.timestamp === newTelemetry.timestamp && t.craneId === newTelemetry.craneId)) {
-            return prev;
-          }
-          
-          // If the user is currently viewing a specific date, and the incoming packet is not for that date,
-          // do not add it to the active telemetry dataset.
-          if (currentSelectedDate && packetDateStr !== currentSelectedDate) {
-            return prev;
-          }
-
-          return [newTelemetry, ...prev];
-        });
       }
+
+      setTelemetry((prev) => {
+        // Prevent duplicates
+        if (prev.some(t => t.timestamp === newTelemetry.timestamp && t.craneId === newTelemetry.craneId)) {
+          return prev;
+        }
+        return [newTelemetry, ...prev];
+      });
 
       if (message.stats) {
         setCraneStats(message.stats);
