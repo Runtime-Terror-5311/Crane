@@ -48,9 +48,9 @@ const formatDuration = (totalSeconds: number) => {
 };
 
 const getLocalDateString = (dateObj: Date) => {
-  const year = dateObj.getFullYear();
-  const month = String(dateObj.getMonth() + 1).padStart(2, '0');
-  const day = String(dateObj.getDate()).padStart(2, '0');
+  const year = dateObj.getUTCFullYear();
+  const month = String(dateObj.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(dateObj.getUTCDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
 };
 
@@ -195,86 +195,101 @@ export default function App() {
 
     initTelemetry();
 
-    // Establish Socket.io connection using current host
-    const socket = io(window.location.origin, {
-      path: "/socket.io",
-      reconnectionAttempts: 15,
-      reconnectionDelay: 1000,
-      transports: ["websocket", "polling"]
-    });
+    // Establish highly robust, auto-reconnecting standard WebSocket connection
+    let ws: WebSocket | null = null;
+    let reconnectTimeout: NodeJS.Timeout | null = null;
+    let isComponentMounted = true;
 
-    socket.on("connect", () => {
-      console.log("Socket.io telemetry stream established successfully!");
-      setWsConnected(true);
-      setError(null);
-    });
+    const connectWS = () => {
+      if (!isComponentMounted) return;
 
-    socket.on("initial_history", (history: CraneTelemetry[]) => {
-      // If we don't have telemetry yet, load the initial history
-      if (history && history.length > 0) {
-        setTelemetry((prev) => prev.length === 0 ? history : prev);
-      }
-    });
+      const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const wsUrl = `${wsProtocol}//${window.location.host}/ws/telemetry`;
+      console.log("Connecting to standard WebSocket:", wsUrl);
 
-    socket.on("initial_stats", (stats: CraneStats[]) => {
-      if (stats) setCraneStats(stats);
-    });
+      ws = new WebSocket(wsUrl);
 
-    socket.on("telemetry_update", (message: { data: CraneTelemetry; stats?: CraneStats[] }) => {
-      const newTelemetry = message.data;
-      const packetDateStr = getLocalDateString(new Date(newTelemetry.timestamp));
-      const currentSelectedDate = selectedDateRef.current;
+      ws.onopen = () => {
+        console.log("Telemetry WebSocket connection established successfully!");
+        setWsConnected(true);
+        setError(null);
+      };
 
-      if (currentSelectedDate && packetDateStr > currentSelectedDate) {
-        // Auto-switch to the new date so we can see the live incoming stream
-        setSelectedDate(packetDateStr);
-        setTelemetry((prev) => {
-          if (prev.some(t => t.timestamp === newTelemetry.timestamp && t.craneId === newTelemetry.craneId)) {
-            return prev;
-          }
-          return [newTelemetry, ...prev];
-        });
-      } else {
-        setTelemetry((prev) => {
-          // Prevent duplicates
-          if (prev.some(t => t.timestamp === newTelemetry.timestamp && t.craneId === newTelemetry.craneId)) {
-            return prev;
-          }
+      ws.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data);
           
-          // If the user is currently viewing a specific date, and the incoming packet is not for that date,
-          // do not add it to the active telemetry dataset.
-          if (currentSelectedDate && packetDateStr !== currentSelectedDate) {
-            return prev;
+          if (message.type === "INITIAL_STATS") {
+            if (message.stats) setCraneStats(message.stats);
+          } else if (message.type === "TELEMETRY_UPDATE") {
+            const newTelemetry = message.data;
+            const packetDateStr = getLocalDateString(new Date(newTelemetry.timestamp));
+            const currentSelectedDate = selectedDateRef.current;
+
+            if (currentSelectedDate && packetDateStr > currentSelectedDate) {
+              // Auto-switch to the new date so we can see the live incoming stream
+              setSelectedDate(packetDateStr);
+              setTelemetry((prev) => {
+                if (prev.some(t => t.timestamp === newTelemetry.timestamp && t.craneId === newTelemetry.craneId)) {
+                  return prev;
+                }
+                return [newTelemetry, ...prev];
+              });
+            } else {
+              setTelemetry((prev) => {
+                // Prevent duplicates
+                if (prev.some(t => t.timestamp === newTelemetry.timestamp && t.craneId === newTelemetry.craneId)) {
+                  return prev;
+                }
+                
+                // If the user is currently viewing a specific date, and the incoming packet is not for that date,
+                // do not add it to the active telemetry dataset.
+                if (currentSelectedDate && packetDateStr !== currentSelectedDate) {
+                  return prev;
+                }
+
+                return [newTelemetry, ...prev];
+              });
+            }
+
+            if (message.stats) {
+              setCraneStats(message.stats);
+            }
+          } else if (message.type === "TELEMETRY_CLEARED") {
+            setTelemetry([]);
+            setCraneStats([]);
+            setSelectedItem(null);
           }
+        } catch (err) {
+          console.error("Error parsing WebSocket message:", err);
+        }
+      };
 
-          const updated = [newTelemetry, ...prev];
-          return updated; // Do not slice here to keep complete metrics for the day
-        });
-      }
+      ws.onclose = (e) => {
+        console.warn(`Telemetry WebSocket link disconnected. Code: ${e.code}, Reason: ${e.reason}`);
+        setWsConnected(false);
+        if (isComponentMounted) {
+          // Attempt to reconnect after 2 seconds
+          reconnectTimeout = setTimeout(connectWS, 2000);
+        }
+      };
 
-      if (message.stats) {
-        setCraneStats(message.stats);
-      }
-    });
+      ws.onerror = (err) => {
+        console.warn("Telemetry WebSocket error:", err);
+        setWsConnected(false);
+      };
+    };
 
-    socket.on("telemetry_cleared", () => {
-      setTelemetry([]);
-      setCraneStats([]);
-      setSelectedItem(null);
-    });
-
-    socket.on("disconnect", () => {
-      console.warn("Socket.io link disconnected.");
-      setWsConnected(false);
-    });
-
-    socket.on("connect_error", (err) => {
-      console.warn("Socket.io connect_error, falling back to Rest Polling:", err);
-      setWsConnected(false);
-    });
+    connectWS();
 
     return () => {
-      socket.disconnect();
+      isComponentMounted = false;
+      if (ws) {
+        ws.close();
+      }
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+      }
     };
   }, []);
 
