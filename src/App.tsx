@@ -235,12 +235,60 @@ export default function App() {
     initTelemetry();
 
     let ws: WebSocket | null = null;
-    let reconnectTimeout: NodeJS.Timeout | null = null;
+    let sse: EventSource | null = null;
+    let wsReconnectTimeout: NodeJS.Timeout | null = null;
+    let sseReconnectTimeout: NodeJS.Timeout | null = null;
     let isDisposed = false;
 
+    // Unified message handler
+    const handleRealtimeMessage = (message: any) => {
+      switch (message.type) {
+        case "INITIAL_HISTORY":
+          if (message.history && message.history.length > 0) {
+            setTelemetry((prev) => prev.length === 0 ? message.history : prev);
+          }
+          break;
+        case "INITIAL_STATS":
+          if (message.stats) {
+            setCraneStats(message.stats);
+          }
+          break;
+        case "TELEMETRY_UPDATE": {
+          const newTelemetry = message.data;
+          const packetDateStr = getISTDateString(new Date(newTelemetry.timestamp));
+          const currentSelectedDate = selectedDateRef.current;
+
+          // Auto-switch to the incoming packet's date so it immediately shows on the dashboard
+          if (currentSelectedDate && packetDateStr !== currentSelectedDate) {
+            setSelectedDate(packetDateStr);
+          }
+
+          setTelemetry((prev) => {
+            // Prevent duplicates
+            if (prev.some(t => t.timestamp === newTelemetry.timestamp && t.craneId === newTelemetry.craneId)) {
+              return prev;
+            }
+            return [newTelemetry, ...prev];
+          });
+
+          if (message.stats) {
+            setCraneStats(message.stats);
+          }
+          break;
+        }
+        case "TELEMETRY_CLEARED":
+          setTelemetry([]);
+          setCraneStats([]);
+          setSelectedItem(null);
+          break;
+        default:
+          break;
+      }
+    };
+
+    // 1. Establish WebSocket
     const connectWebSocket = () => {
       if (isDisposed) return;
-
       try {
         const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
         const wsUrl = `${wsProtocol}//${window.location.host}/ws/telemetry`;
@@ -256,63 +304,25 @@ export default function App() {
 
         ws.onclose = (event) => {
           console.warn(`WebSocket closed. Code: ${event.code}, Reason: ${event.reason}. Retrying connection...`);
-          setWsConnected(false);
+          if (!sse || sse.readyState !== EventSource.OPEN) {
+            setWsConnected(false);
+          }
           if (!isDisposed) {
-            reconnectTimeout = setTimeout(connectWebSocket, 3000);
+            wsReconnectTimeout = setTimeout(connectWebSocket, 5000);
           }
         };
 
         ws.onerror = () => {
-          // Softly handle connection errors since the fallback polling system will manage updates.
-          console.warn("WebSocket connection was not established (this is expected if running behind certain sandboxed proxies/iframes). Activating fallback polling mode...");
-          setWsConnected(false);
+          console.warn("WebSocket connection error. Relying on Server-Sent Events / polling fallbacks...");
+          if (!sse || sse.readyState !== EventSource.OPEN) {
+            setWsConnected(false);
+          }
         };
 
         ws.onmessage = (event) => {
           try {
             const message = JSON.parse(event.data);
-            switch (message.type) {
-              case "INITIAL_HISTORY":
-                if (message.history && message.history.length > 0) {
-                  setTelemetry((prev) => prev.length === 0 ? message.history : prev);
-                }
-                break;
-              case "INITIAL_STATS":
-                if (message.stats) {
-                  setCraneStats(message.stats);
-                }
-                break;
-              case "TELEMETRY_UPDATE": {
-                const newTelemetry = message.data;
-                const packetDateStr = getISTDateString(new Date(newTelemetry.timestamp));
-                const currentSelectedDate = selectedDateRef.current;
-
-                // Auto-switch to the incoming packet's date so it immediately shows on the dashboard
-                if (currentSelectedDate && packetDateStr !== currentSelectedDate) {
-                  setSelectedDate(packetDateStr);
-                }
-
-                setTelemetry((prev) => {
-                  // Prevent duplicates
-                  if (prev.some(t => t.timestamp === newTelemetry.timestamp && t.craneId === newTelemetry.craneId)) {
-                    return prev;
-                  }
-                  return [newTelemetry, ...prev];
-                });
-
-                if (message.stats) {
-                  setCraneStats(message.stats);
-                }
-                break;
-              }
-              case "TELEMETRY_CLEARED":
-                setTelemetry([]);
-                setCraneStats([]);
-                setSelectedItem(null);
-                break;
-              default:
-                break;
-            }
+            handleRealtimeMessage(message);
           } catch (jsonErr) {
             console.error("Failed to parse WebSocket message:", jsonErr);
           }
@@ -320,21 +330,60 @@ export default function App() {
       } catch (connErr) {
         console.error("Error setting up WebSocket:", connErr);
         if (!isDisposed) {
-          reconnectTimeout = setTimeout(connectWebSocket, 3000);
+          wsReconnectTimeout = setTimeout(connectWebSocket, 5000);
+        }
+      }
+    };
+
+    // 2. Establish Server-Sent Events (SSE)
+    const connectSSE = () => {
+      if (isDisposed) return;
+      try {
+        console.log("Attempting Server-Sent Events (SSE) stream connection...");
+        sse = new EventSource("/api/telemetry/stream");
+
+        sse.onopen = () => {
+          console.log("SSE stream established successfully!");
+          setWsConnected(true);
+          setError(null);
+        };
+
+        sse.onerror = () => {
+          console.warn("SSE connection closed or failed. Retrying SSE stream in 5s...");
+          if (!ws || ws.readyState !== WebSocket.OPEN) {
+            setWsConnected(false);
+          }
+          if (sse) sse.close();
+          if (!isDisposed) {
+            sseReconnectTimeout = setTimeout(connectSSE, 5000);
+          }
+        };
+
+        sse.onmessage = (event) => {
+          try {
+            const message = JSON.parse(event.data);
+            handleRealtimeMessage(message);
+          } catch (jsonErr) {
+            console.error("Failed to parse SSE message:", jsonErr);
+          }
+        };
+      } catch (err) {
+        console.error("Error setting up SSE stream:", err);
+        if (!isDisposed) {
+          sseReconnectTimeout = setTimeout(connectSSE, 5000);
         }
       }
     };
 
     connectWebSocket();
+    connectSSE();
 
     return () => {
       isDisposed = true;
-      if (ws) {
-        ws.close();
-      }
-      if (reconnectTimeout) {
-        clearTimeout(reconnectTimeout);
-      }
+      if (ws) ws.close();
+      if (sse) sse.close();
+      if (wsReconnectTimeout) clearTimeout(wsReconnectTimeout);
+      if (sseReconnectTimeout) clearTimeout(sseReconnectTimeout);
     };
   }, []);
 
@@ -345,14 +394,14 @@ export default function App() {
     }
   }, [selectedDate]);
 
-  // Polling fallback if Socket.io is offline
+  // Polling fallback if WebSocket & SSE are offline
   useEffect(() => {
     let pollTimer: NodeJS.Timeout | null = null;
     if (!wsConnected && selectedDate) {
       pollTimer = setInterval(async () => {
         try {
           // 1. Check if there's any newer telemetry in the database first (e.g. uploaded via REST or LoRa)
-          const latestData = await fetchJsonWithRetry("/api/crane?limit=1", {}, 1, 500);
+          const latestData = await fetchJsonWithRetry("/api/crane?limit=1", {}, 1, 300);
           if (latestData && latestData.length > 0) {
             const latestDateInDb = getISTDateString(new Date(latestData[0].timestamp));
             if (latestDateInDb > selectedDate) {
@@ -368,7 +417,7 @@ export default function App() {
         } catch (err) {
           console.warn("Polling interval failed to refresh telemetry:", err);
         }
-      }, 4000);
+      }, 2000);
     }
     return () => {
       if (pollTimer) clearInterval(pollTimer);

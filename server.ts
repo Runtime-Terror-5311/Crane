@@ -127,6 +127,20 @@ function broadcast(data: any) {
   }
 }
 
+// SSE Clients and Broadcast Helper
+const sseClients = new Set<any>();
+
+function broadcastSSE(data: any) {
+  const payload = `data: ${JSON.stringify(data)}\n\n`;
+  for (const client of sseClients) {
+    try {
+      client.res.write(payload);
+    } catch (err) {
+      sseClients.delete(client);
+    }
+  }
+}
+
 // MongoDB Configuration
 const mongoUri = process.env.MONGODB_URI || "";
 let mongoClient: MongoClient | null = null;
@@ -334,6 +348,13 @@ async function processTelemetryAndStats(data: any) {
 
   // Broadcast to all active clients (WebSockets)
   broadcast({
+    type: "TELEMETRY_UPDATE",
+    data: savedItem,
+    stats: Object.values(craneStatsMemory)
+  });
+
+  // Broadcast to Server-Sent Events (SSE)
+  broadcastSSE({
     type: "TELEMETRY_UPDATE",
     data: savedItem,
     stats: Object.values(craneStatsMemory)
@@ -643,6 +664,7 @@ async function clearTelemetry() {
   if (success) {
     io.emit("telemetry_cleared");
     broadcast({ type: "TELEMETRY_CLEARED" });
+    broadcastSSE({ type: "TELEMETRY_CLEARED" });
   }
   return success;
 }
@@ -650,6 +672,25 @@ async function clearTelemetry() {
 // ==========================================
 // API ROUTES
 // ==========================================
+
+// GET /api/telemetry/stream - Server-Sent Events (SSE) endpoint for real-time telemetry streaming
+app.get("/api/telemetry/stream", (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+
+  const client = { res };
+  sseClients.add(client);
+
+  // Send initial signal
+  res.write(`data: ${JSON.stringify({ type: "CONNECTED" })}\n\n`);
+
+  req.on("close", () => {
+    sseClients.delete(client);
+    res.end();
+  });
+});
 
 // GET /api/config - Returns connection details, dynamic REST, and WebSocket URL
 app.get("/api/config", (req, res) => {
