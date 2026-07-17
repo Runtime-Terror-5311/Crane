@@ -47,11 +47,54 @@ const formatDuration = (totalSeconds: number) => {
   return `${s}s`;
 };
 
-const getLocalDateString = (dateObj: Date) => {
-  const year = dateObj.getUTCFullYear();
-  const month = String(dateObj.getUTCMonth() + 1).padStart(2, '0');
-  const day = String(dateObj.getUTCDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+const getISTDateString = (dateObj: Date) => {
+  try {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Kolkata',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    }).format(dateObj);
+  } catch (e) {
+    const year = dateObj.getUTCFullYear();
+    const month = String(dateObj.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(dateObj.getUTCDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
+};
+
+const formatISTTime = (timestamp: string | Date) => {
+  const d = typeof timestamp === 'string' ? new Date(timestamp) : timestamp;
+  return d.toLocaleTimeString('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  });
+};
+
+const formatISTDate = (timestamp: string | Date) => {
+  const d = typeof timestamp === 'string' ? new Date(timestamp) : timestamp;
+  return d.toLocaleDateString('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    day: '2-digit',
+    month: '2-digit'
+  });
+};
+
+const getISTHour = (dateObj: Date) => {
+  try {
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Asia/Kolkata',
+      hour: 'numeric',
+      hour12: false
+    });
+    const hr = parseInt(formatter.format(dateObj), 10);
+    return hr === 24 ? 0 : hr;
+  } catch (e) {
+    return dateObj.getUTCHours();
+  }
 };
 
 const getCraneLimits = (craneId: string) => {
@@ -91,7 +134,7 @@ export default function App() {
   const [copiedText, setCopiedText] = useState(false);
   const [filterCraneId, setFilterCraneId] = useState("All");
   const [selectedDate, setSelectedDate] = useState<string>(() => {
-    return getLocalDateString(new Date());
+    return getISTDateString(new Date());
   });
   
   const selectedDateRef = useRef(selectedDate);
@@ -100,7 +143,6 @@ export default function App() {
   }, [selectedDate]);
   
   // Table view filter states
-  const [displayLimit, setDisplayLimit] = useState<number>(100);
   const [startTimeFilter, setStartTimeFilter] = useState<string>("00:00");
   const [endTimeFilter, setEndTimeFilter] = useState<string>("23:59");
 
@@ -177,7 +219,7 @@ export default function App() {
         setLoading(true);
         const data = await fetchJsonWithRetry("/api/crane", {}, 5, 1000);
         if (data && data.length > 0) {
-          const latestDate = getLocalDateString(new Date(data[0].timestamp));
+          const latestDate = getISTDateString(new Date(data[0].timestamp));
           setSelectedDate(latestDate);
         } else {
           await fetchLogs(false, selectedDate);
@@ -222,7 +264,7 @@ export default function App() {
 
     socket.on("telemetry_update", (message: { data: CraneTelemetry; stats?: CraneStats[] }) => {
       const newTelemetry = message.data;
-      const packetDateStr = getLocalDateString(new Date(newTelemetry.timestamp));
+      const packetDateStr = getISTDateString(new Date(newTelemetry.timestamp));
       const currentSelectedDate = selectedDateRef.current;
 
       // Auto-switch to the incoming packet's date so it immediately shows on the dashboard
@@ -280,7 +322,7 @@ export default function App() {
           // 1. Check if there's any newer telemetry in the database first (e.g. uploaded via REST or LoRa)
           const latestData = await fetchJsonWithRetry("/api/crane?limit=1", {}, 1, 500);
           if (latestData && latestData.length > 0) {
-            const latestDateInDb = getLocalDateString(new Date(latestData[0].timestamp));
+            const latestDateInDb = getISTDateString(new Date(latestData[0].timestamp));
             if (latestDateInDb > selectedDate) {
               // A newer date has been uploaded! Switch to it.
               setSelectedDate(latestDateInDb);
@@ -335,7 +377,7 @@ export default function App() {
 
         const resData = await response.json().catch(() => ({}));
         if (resData && resData.data && resData.data.timestamp) {
-          const newPacketDate = getLocalDateString(new Date(resData.data.timestamp));
+          const newPacketDate = getISTDateString(new Date(resData.data.timestamp));
           if (newPacketDate > selectedDate) {
             setSelectedDate(newPacketDate);
           } else {
@@ -434,7 +476,7 @@ export default function App() {
     // 2. Date filter (double check)
     if (selectedDate) {
       result = result.filter(t => {
-        const dStr = getLocalDateString(new Date(t.timestamp));
+        const dStr = getISTDateString(new Date(t.timestamp));
         return dStr === selectedDate;
       });
     }
@@ -443,8 +485,15 @@ export default function App() {
     if (startTimeFilter || endTimeFilter) {
       result = result.filter(t => {
         const itemDate = new Date(t.timestamp);
-        const hours = itemDate.getHours();
-        const minutes = itemDate.getMinutes();
+        let hours = itemDate.getUTCHours();
+        let minutes = itemDate.getUTCMinutes();
+        try {
+          const hrStr = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Kolkata', hour: 'numeric', hour12: false }).format(itemDate);
+          const minStr = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Kolkata', minute: 'numeric' }).format(itemDate);
+          const parsedHr = parseInt(hrStr, 10);
+          hours = parsedHr === 24 ? 0 : parsedHr;
+          minutes = parseInt(minStr, 10);
+        } catch (e) {}
         const timeVal = hours * 60 + minutes; // total minutes from start of day
         
         let startVal = 0;
@@ -466,8 +515,8 @@ export default function App() {
     // 4. Sort descending (newest first)
     result.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
     
-    // 5. Slice to display limit
-    return result.slice(0, displayLimit);
+    // 5. Return all records
+    return result;
   })();
 
   // Operational times calculations
@@ -531,13 +580,14 @@ export default function App() {
     const dayLogs = [...telemetry]
       .filter(t => filterCraneId === "All" || t.craneId === filterCraneId)
       .filter(t => {
-        const dStr = getLocalDateString(new Date(t.timestamp));
+        const dStr = getISTDateString(new Date(t.timestamp));
         return dStr === selectedDate;
       })
       .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
-    // Initialize hourly operating time in seconds for 24 hours
-    const hourlySeconds = Array(24).fill(0);
+    // Initialize hourly working and idle time in seconds for 24 hours
+    const hourlyWorkingSeconds = Array(24).fill(0);
+    const hourlyIdleSeconds = Array(24).fill(0);
 
     for (let i = 0; i < dayLogs.length; i++) {
       const item = dayLogs[i];
@@ -559,27 +609,35 @@ export default function App() {
       // Operating / Working time consists of: working with load, working without load, and standstill with load
       const isOperating = (isMoving && hasLoad) || (isMoving && !hasLoad) || (!isMoving && hasLoad);
 
-      if (isOperating) {
-        const hour = new Date(item.timestamp).getHours();
-        if (hour >= 0 && hour < 24) {
-          hourlySeconds[hour] += gap;
+      const hour = getISTHour(new Date(item.timestamp));
+      if (hour >= 0 && hour < 24) {
+        if (isOperating) {
+          hourlyWorkingSeconds[hour] += gap;
+        } else {
+          hourlyIdleSeconds[hour] += gap;
         }
       }
     }
 
-    // Convert seconds to hours with decimal format
-    return hourlySeconds.map((secs, idx) => {
+    // Convert seconds to minutes with decimal format
+    return hourlyWorkingSeconds.map((workingSecs, idx) => {
+      const idleSecs = hourlyIdleSeconds[idx];
       const label = `${String(idx).padStart(2, "0")}:00`;
-      const hoursVal = parseFloat((secs / 3600).toFixed(3)); // convert to hours
+      const workingMinutesVal = parseFloat((workingSecs / 60).toFixed(1)); // convert to minutes
+      const idleMinutesVal = parseFloat((idleSecs / 60).toFixed(1)); // convert to minutes
       return {
         hour: label,
-        operatingHours: hoursVal,
-        seconds: secs
+        workingMinutes: workingMinutesVal,
+        idleMinutes: idleMinutesVal,
+        workingSeconds: workingSecs,
+        idleSeconds: idleSecs,
+        totalSeconds: workingSecs + idleSecs
       };
     });
   })();
 
-  const totalDailyOperatingSec = dailyHourlyStats.reduce((acc, curr) => acc + curr.seconds, 0);
+  const totalDailyOperatingSec = dailyHourlyStats.reduce((acc, curr) => acc + curr.workingSeconds, 0);
+  const totalDailyIdleSec = dailyHourlyStats.reduce((acc, curr) => acc + curr.idleSeconds, 0);
 
   return (
     <div id="root-container" className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
@@ -631,8 +689,9 @@ export default function App() {
             <div className="flex-1">
               <span className="uppercase tracking-wider font-black">CRITICAL CAPACITY OVERLOAD ALERT:</span> Crane <span className="underline font-mono">{latestOverload.craneId}</span> has exceeded {hoistType} safety limit of {activeLimit.toLocaleString()} kg! Measured Load: <span className="font-mono text-sm underline">{exceedingWeight.toLocaleString()} kg</span>.
             </div>
-            <span className="text-[10px] bg-red-800 px-2 py-0.5 rounded font-mono font-bold">
-              {new Date(latestOverload.timestamp).toLocaleTimeString()}
+            <span className="text-[10px] bg-red-800 px-2 py-1 rounded font-mono font-bold text-white flex flex-col items-end gap-0.5">
+              <span>{formatISTTime(latestOverload.timestamp)} (IST)</span>
+              <span className="text-[9px] text-red-200/80 font-normal">{new Date(latestOverload.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'UTC' })} UTC</span>
             </span>
           </div>
         );
@@ -833,31 +892,16 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Display Limit Selector */}
-                  <div className="flex items-center gap-2">
-                    <span className="text-slate-500 font-bold uppercase tracking-wider text-[10px]">Show:</span>
-                    <select 
-                      value={displayLimit} 
-                      onChange={(e) => setDisplayLimit(Number(e.target.value))}
-                      className="bg-slate-900 border border-slate-800 rounded px-2.5 py-1.5 text-[11px] font-bold text-indigo-300 focus:outline-none focus:border-indigo-500"
-                    >
-                      <option value={100}>Top 100</option>
-                      <option value={500}>Top 500</option>
-                      <option value={10000}>All Records</option>
-                    </select>
-                  </div>
-
                   {/* Reset Filters / Record Count */}
                   <div className="ml-auto flex items-center gap-3">
                     <span className="text-[10px] text-slate-500 font-bold">
                       Showing {filteredTelemetry.length} of {telemetry.length} packets
                     </span>
-                    {(startTimeFilter !== "00:00" || endTimeFilter !== "23:59" || displayLimit !== 100) && (
+                    {(startTimeFilter !== "00:00" || endTimeFilter !== "23:59") && (
                       <button 
                         onClick={() => {
                           setStartTimeFilter("00:00");
                           setEndTimeFilter("23:59");
-                          setDisplayLimit(100);
                         }}
                         className="text-[10px] text-indigo-400 hover:text-indigo-300 underline font-bold cursor-pointer"
                       >
@@ -947,9 +991,14 @@ export default function App() {
                             >
                               {/* TIME COLUMN */}
                               <td className="p-3 pl-4 text-slate-400 font-medium whitespace-nowrap">
-                                {new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}
-                                <span className="text-[9px] text-slate-600 block">
-                                  {new Date(item.timestamp).toLocaleDateString([], { month: '2-digit', day: '2-digit' })}
+                                <span className="text-white font-bold block">
+                                  {formatISTTime(item.timestamp)} <span className="text-[9px] text-indigo-400 font-normal">IST</span>
+                                </span>
+                                <span className="text-[10px] text-slate-500 block leading-tight mt-0.5">
+                                  UTC: {new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'UTC' })}
+                                </span>
+                                <span className="text-[9px] text-slate-600 block mt-0.5 leading-none">
+                                  Date: {formatISTDate(item.timestamp)} (IST) | {new Date(item.timestamp).toLocaleDateString([], { month: '2-digit', day: '2-digit', timeZone: 'UTC' })} (UTC)
                                 </span>
                               </td>
 
@@ -1208,8 +1257,8 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="h-72 w-full mt-2">
-                  {totalDailyOperatingSec > 0 ? (
+                 <div className="h-72 w-full mt-2">
+                  {(totalDailyOperatingSec + totalDailyIdleSec) > 0 ? (
                     <ResponsiveContainer width="100%" height="100%">
                       <BarChart 
                         data={dailyHourlyStats} 
@@ -1220,22 +1269,21 @@ export default function App() {
                         <YAxis 
                           stroke="#64748b" 
                           fontSize={9} 
-                          tickFormatter={(value) => `${value}h`}
+                          tickFormatter={(value) => `${value}m`}
                         />
                         <Tooltip 
                           contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155', borderRadius: '8px' }}
                           itemStyle={{ color: '#f8fafc' }}
                           labelStyle={{ color: '#94a3b8', fontWeight: 'bold' }}
-                          formatter={(value: any) => [`${value} hrs (${formatDuration(Math.round(Number(value) * 3600))})`, 'Working Time']}
+                          formatter={(value: any, name: any) => {
+                            const valNum = Number(value);
+                            const durationStr = formatDuration(Math.round(valNum * 60));
+                            return [`${valNum} min (${durationStr})`, name === "workingMinutes" ? "Working Time" : "Idle Time"];
+                          }}
                         />
-                        <Bar dataKey="operatingHours" fill="#6366f1" radius={[4, 4, 0, 0]}>
-                          {dailyHourlyStats.map((entry, index) => (
-                            <Cell 
-                              key={`cell-${index}`} 
-                              fill={entry.operatingHours > 0 ? "#6366f1" : "#1e293b"} 
-                            />
-                          ))}
-                        </Bar>
+                        <Legend verticalAlign="top" height={36} wrapperStyle={{ fontSize: '10px', fontFamily: 'monospace' }} />
+                        <Bar dataKey="workingMinutes" name="Working Time" fill="#6366f1" stackId="a" />
+                        <Bar dataKey="idleMinutes" name="Idle Time" fill="#475569" stackId="a" />
                       </BarChart>
                     </ResponsiveContainer>
                   ) : (
@@ -1357,7 +1405,8 @@ export default function App() {
                           .map(t => {
                             const { mainLimit, auxLimit } = getCraneLimits(t.craneId);
                             return {
-                              time: new Date(t.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }),
+                              time: formatISTTime(t.timestamp),
+                              utcTime: new Date(t.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'UTC' }),
                               mhw: t.mainWeight ?? 0,
                               ahw: t.auxWeight ?? 0,
                               mainLimit,
@@ -1373,7 +1422,21 @@ export default function App() {
                           contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155', borderRadius: '8px' }}
                           itemStyle={{ color: '#f8fafc' }}
                           labelStyle={{ color: '#94a3b8', fontWeight: 'bold' }}
-                          formatter={(value: any) => [`${value.toLocaleString()} kg`, 'Weight']}
+                          labelFormatter={(label, items) => {
+                            const payload = items?.[0]?.payload;
+                            if (payload?.utcTime) {
+                              return `${label} (IST) / ${payload.utcTime} (UTC)`;
+                            }
+                            return `${label} (IST)`;
+                          }}
+                          formatter={(value: any, name: any) => {
+                            let displayName = name;
+                            if (name === "Main Hoist Weight") displayName = "MHW";
+                            else if (name === "Aux Hoist Weight") displayName = "AHW";
+                            else if (name === "Main Hoist Safety Limit") displayName = "MHW Limit";
+                            else if (name === "Aux Hoist Safety Limit") displayName = "AHW Limit";
+                            return [`${value.toLocaleString()} kg`, displayName];
+                          }}
                         />
                         <Legend verticalAlign="top" height={36} wrapperStyle={{ fontSize: '10px', fontFamily: 'monospace' }} />
                         <Line type="monotone" dataKey="mhw" name="Main Hoist Weight" stroke="#10b981" strokeWidth={2} dot={{ r: 2.5 }} activeDot={{ r: 5 }} />
@@ -1410,7 +1473,8 @@ export default function App() {
                           .slice(0, 40)
                           .reverse()
                           .map(t => ({
-                            time: new Date(t.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }),
+                            time: formatISTTime(t.timestamp),
+                            utcTime: new Date(t.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'UTC' }),
                             lt: t.lt ?? 0,
                             ct: t.ct ?? 0
                           }))}
@@ -1423,6 +1487,13 @@ export default function App() {
                           contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155', borderRadius: '8px' }}
                           itemStyle={{ color: '#f8fafc' }}
                           labelStyle={{ color: '#94a3b8', fontWeight: 'bold' }}
+                          labelFormatter={(label, items) => {
+                            const payload = items?.[0]?.payload;
+                            if (payload?.utcTime) {
+                              return `${label} (IST) / ${payload.utcTime} (UTC)`;
+                            }
+                            return `${label} (IST)`;
+                          }}
                         />
                         <Legend verticalAlign="top" height={36} wrapperStyle={{ fontSize: '10px', fontFamily: 'monospace' }} />
                         <Area type="monotone" dataKey="lt" name="Long Travel (LT)" stroke="#6366f1" fill="#6366f1" fillOpacity={0.1} strokeWidth={1.5} />

@@ -299,16 +299,10 @@ async function processTelemetryAndStats(data: any) {
     } catch (err) {
       console.error("MongoDB telemetry insert failed, storing in memory instead:", err);
       memoryTelemetry.unshift(telemetryItem);
-      if (memoryTelemetry.length > 3000) {
-        memoryTelemetry = memoryTelemetry.slice(0, 3000);
-      }
       savedItem = telemetryItem;
     }
   } else {
     memoryTelemetry.unshift(telemetryItem);
-    if (memoryTelemetry.length > 3000) {
-      memoryTelemetry = memoryTelemetry.slice(0, 3000);
-    }
     savedItem = telemetryItem;
   }
 
@@ -356,7 +350,7 @@ async function getTelemetry(date?: string, limit?: number) {
         cursor = cursor.limit(limit);
       } else if (!date) {
         // Fallback default limit if no date filter is present
-        cursor = cursor.limit(1000);
+        cursor = cursor.limit(500000);
       }
       
       const items = await cursor.toArray();
