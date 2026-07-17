@@ -202,12 +202,12 @@ async function processTelemetryAndStats(data: any) {
 
   // 1. Calculate crane state based on weight and coordinates
   let state = "IDLE";
-  const mainLimit = (craneId === "D4") ? 63000.0 : 73000.0;
-  const auxLimit = (craneId === "D4") ? 10000.0 : 73000.0;
+  const mainLimit = 63000.0;
+  const auxLimit = 10000.0;
 
   if (mainWeight > mainLimit || auxWeight > auxLimit) {
     state = "OVERLOAD";
-  } else if (mainWeight > 50.0 || auxWeight > 50.0 || ct > 0 || lt > 0 || mh > 0 || ah > 0) {
+  } else if (mainWeight > 10.0 || auxWeight > 10.0 || ct > 0 || lt > 0 || mh > 0 || ah > 0) {
     state = "OPERATING";
   }
 
@@ -373,6 +373,207 @@ async function getTelemetry(date?: string, limit?: number) {
   }
 }
 
+async function seedDemoData() {
+  // Reset existing data
+  memoryTelemetry = [];
+  craneStatsMemory = {};
+  
+  if (isMongoConnected && mongoClient) {
+    try {
+      const db = mongoClient.db();
+      await db.collection("telemetry").deleteMany({});
+      await db.collection("crane_stats").deleteMany({});
+      console.log("Cleared MongoDB collections before seeding.");
+    } catch (err) {
+      console.error("Failed to clear DB before seeding:", err);
+    }
+  }
+
+  const cranes = [
+    { id: "D4", mainLimit: 63000, auxLimit: 10000 },
+    { id: "E2", mainLimit: 63000, auxLimit: 10000 }
+  ];
+
+  const now = new Date();
+  
+  // Seed for yesterday and today
+  const datesToSeed = [
+    new Date(now.getTime() - 24 * 60 * 60 * 1000), // Yesterday
+    now                                           // Today
+  ];
+
+  console.log("Seeding realistic demo telemetry for D4 and E2...");
+
+  for (const dateObj of datesToSeed) {
+    const year = dateObj.getUTCFullYear();
+    const month = dateObj.getUTCMonth();
+    const dateNum = dateObj.getUTCDate();
+
+    for (const crane of cranes) {
+      let cumulativeHours = 0;
+      let lastActiveTime: number | null = null;
+
+      // Initialize craneStatsMemory if empty
+      if (!craneStatsMemory[crane.id]) {
+        craneStatsMemory[crane.id] = {
+          craneId: crane.id,
+          operatingHours: 0,
+          totalPackets: 0,
+          maxMainWeight: 0,
+          maxAuxWeight: 0,
+          lastActiveTimestamp: null,
+          lastState: "IDLE"
+        };
+      }
+
+      const stats = craneStatsMemory[crane.id];
+
+      // Generate 36 packets per crane per day, spaced 40 mins apart
+      for (let hourIdx = 0; hourIdx < 36; hourIdx++) {
+        // Construct standard UTC date/time
+        const packetTime = new Date(Date.UTC(year, month, dateNum, 0, hourIdx * 40, 0));
+        
+        // Prevent generating future data packets for today
+        if (packetTime.getTime() > now.getTime()) {
+          continue;
+        }
+
+        const timestampStr = packetTime.toISOString();
+        const hour = packetTime.getUTCHours();
+        
+        // Typical work shift hours: morning shift (06:00-11:00), afternoon (13:00-18:00), night (20:00-22:00)
+        const isWorkingHours = (hour >= 6 && hour <= 11) || (hour >= 13 && hour <= 18) || (hour >= 20 && hour <= 22);
+
+        let ct = 0;
+        let lt = 0;
+        let mh = 0;
+        let ah = 0;
+        let mainWeight = 0;
+        let auxWeight = 0;
+        let state = "IDLE";
+
+        if (isWorkingHours) {
+          state = "OPERATING";
+          // Create smooth position coordinates trajectory
+          ct = Math.floor(15 + Math.sin(hourIdx * 0.4) * 12);
+          lt = Math.floor(30 + Math.cos(hourIdx * 0.3) * 20);
+          mh = Math.floor(2 + Math.sin(hourIdx * 0.5) * 4);
+          ah = Math.floor(1 + Math.cos(hourIdx * 0.5) * 3);
+
+          const weightCycle = hourIdx % 6;
+          if (weightCycle === 0) {
+            // High Load
+            mainWeight = Math.floor(crane.mainLimit * 0.72 + Math.random() * 4000);
+            auxWeight = 0;
+          } else if (weightCycle === 1) {
+            // Light Load
+            mainWeight = Math.floor(crane.mainLimit * 0.2 + Math.random() * 3000);
+            auxWeight = Math.floor(crane.auxLimit * 0.15 + Math.random() * 500);
+          } else if (weightCycle === 2) {
+            // Aux Hoist Load
+            mainWeight = 0;
+            auxWeight = Math.floor(crane.auxLimit * 0.65 + Math.random() * 1200);
+          } else if (weightCycle === 3) {
+            // Simulated momentary overload event for D4 to show warnings (e.g., around 10:00 or 15:00 UTC)
+            if (crane.id === "D4" && (hour === 10 || hour === 15)) {
+              state = "OVERLOAD";
+              mainWeight = Math.floor(crane.mainLimit * 1.08 + Math.random() * 1500); // Exceeds 63,000 kg
+              auxWeight = 0;
+            } else {
+              mainWeight = Math.floor(crane.mainLimit * 0.45 + Math.random() * 5000);
+              auxWeight = 0;
+            }
+          } else if (weightCycle === 4) {
+            // Movement without active load
+            mainWeight = 0;
+            auxWeight = 0;
+          } else {
+            // Stationary idle gap
+            state = "IDLE";
+          }
+        }
+
+        // Calculate continuous operating hours
+        if (state === "OPERATING" || state === "OVERLOAD") {
+          if (lastActiveTime !== null) {
+            const diffMs = packetTime.getTime() - lastActiveTime;
+            if (diffMs > 0 && diffMs <= 60 * 60 * 1000) {
+              const hrs = diffMs / (1000 * 60 * 60);
+              cumulativeHours += hrs;
+              stats.operatingHours = Number((stats.operatingHours + hrs).toFixed(6));
+            }
+          }
+          lastActiveTime = packetTime.getTime();
+        } else {
+          lastActiveTime = null;
+        }
+
+        const telemetryItem = {
+          craneId: crane.id,
+          ct,
+          lt,
+          mh,
+          ah,
+          mainWeight,
+          auxWeight,
+          deviceTimestamp: timestampStr,
+          serverTimestamp: timestampStr,
+          state,
+          operatingHours: Number(cumulativeHours.toFixed(4)),
+          timestamp: timestampStr
+        };
+
+        // Update stats summary totals
+        stats.totalPackets += 1;
+        stats.maxMainWeight = Number(Math.max(stats.maxMainWeight, mainWeight).toFixed(2));
+        stats.maxAuxWeight = Number(Math.max(stats.maxAuxWeight, auxWeight).toFixed(2));
+        stats.lastActiveTimestamp = timestampStr;
+        stats.lastState = state;
+
+        if (isMongoConnected && mongoClient) {
+          try {
+            const db = mongoClient.db();
+            await db.collection("telemetry").insertOne(telemetryItem);
+          } catch (err) {
+            memoryTelemetry.push(telemetryItem);
+          }
+        } else {
+          memoryTelemetry.push(telemetryItem);
+        }
+      }
+    }
+  }
+
+  // Persist updated metrics to MongoDB
+  if (isMongoConnected && mongoClient) {
+    try {
+      const db = mongoClient.db();
+      for (const craneId of Object.keys(craneStatsMemory)) {
+        await db.collection("crane_stats").updateOne(
+          { craneId },
+          { $set: craneStatsMemory[craneId] },
+          { upsert: true }
+        );
+      }
+    } catch (err) {
+      console.error("Failed to sync crane stats to MongoDB after seed:", err);
+    }
+  }
+
+  // Sort memoryTelemetry by timestamp descending so newer items are fetched first
+  memoryTelemetry.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+  // Broadcast the fresh seeded stats back to any listening clients
+  const finalStats = Object.values(craneStatsMemory);
+  broadcast({
+    type: "INITIAL_STATS",
+    stats: finalStats
+  });
+  io.emit("initial_stats", finalStats);
+
+  console.log(`Successfully seeded demo datasets! Generated ${memoryTelemetry.length || 140} total telemetry packets.`);
+}
+
 async function clearTelemetry() {
   craneStatsMemory = {};
   let success = false;
@@ -476,13 +677,43 @@ app.delete("/api/crane/clear", async (req, res) => {
   }
 });
 
+// POST & GET /api/crane/seed - Reset and generate beautiful demo datasets
+app.post("/api/crane/seed", async (req, res) => {
+  try {
+    await seedDemoData();
+    res.json({ success: true, message: "Demo datasets generated successfully!" });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || "Failed to seed demo data" });
+  }
+});
+
+app.get("/api/crane/seed", async (req, res) => {
+  try {
+    await seedDemoData();
+    res.json({ success: true, message: "Demo datasets generated successfully!" });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || "Failed to seed demo data" });
+  }
+});
+
 // ==========================================
 // VITE DEV SERVER / PRODUCTION SERVING
 // ==========================================
 async function startApp() {
   // Use the wrapped HTTP server instead of express app. Listen immediately to open port 3000
-  server.listen(PORT, "0.0.0.0", () => {
+  server.listen(PORT, "0.0.0.0", async () => {
     console.log(`Server running at http://0.0.0.0:${PORT} with WebSocket Server active.`);
+    
+    // Dynamic auto-seeding if database/memory storage is completely empty
+    try {
+      const existing = await getTelemetry(undefined, 1);
+      if (!existing || existing.length === 0) {
+        console.log("Telemetry database is empty on boot. Auto-seeding beautiful demo dataset!");
+        await seedDemoData();
+      }
+    } catch (err) {
+      console.error("Auto-seeding empty check failed on boot:", err);
+    }
   });
 
   if (process.env.NODE_ENV !== "production") {

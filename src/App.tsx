@@ -55,10 +55,7 @@ const getLocalDateString = (dateObj: Date) => {
 };
 
 const getCraneLimits = (craneId: string) => {
-  if (craneId === "D4") {
-    return { mainLimit: 63000, auxLimit: 10000 };
-  }
-  return { mainLimit: 73000, auxLimit: 73000 };
+  return { mainLimit: 63000, auxLimit: 10000 };
 };
 
 const fetchJsonWithRetry = async (url: string, options?: RequestInit, retries = 5, delay = 1000): Promise<any> => {
@@ -384,6 +381,29 @@ export default function App() {
       console.error(err);
       setActionError("Error clearing logs.");
       setShowClearConfirm(false);
+    }
+  };
+
+  // Seed database logs with high-quality demo data
+  const [isSeeding, setIsSeeding] = useState(false);
+  const handleSeedLogs = async () => {
+    setActionError(null);
+    setIsSeeding(true);
+    try {
+      const response = await fetch("/api/crane/seed", { method: "POST" });
+      if (response.ok) {
+        // Refresh local state with silent flag to avoid visual flashes
+        await fetchLogs(true, selectedDate);
+        await fetchStats();
+        setSelectedItem(null);
+      } else {
+        setActionError("Failed to seed database logs with demo data.");
+      }
+    } catch (err) {
+      console.error(err);
+      setActionError("Error seeding demo logs.");
+    } finally {
+      setIsSeeding(false);
     }
   };
 
@@ -736,33 +756,44 @@ export default function App() {
                         ))}
                       </select>
                     </div>
-                    {telemetry.length > 0 && (
-                      <div className="flex items-center gap-1.5">
-                        {showClearConfirm ? (
-                          <>
-                            <button 
-                              onClick={() => setShowClearConfirm(false)}
-                              className="text-[10px] text-slate-400 hover:text-slate-300 font-bold transition px-2 py-1 border border-slate-700 bg-slate-900 rounded"
-                            >
-                              Cancel
-                            </button>
+                    <div className="flex items-center gap-2">
+                      <button 
+                        onClick={handleSeedLogs}
+                        disabled={isSeeding}
+                        className="text-[11px] text-indigo-400 hover:text-indigo-300 disabled:opacity-50 transition flex items-center gap-1 border border-indigo-500/20 px-2.5 py-1 bg-indigo-950/20 rounded cursor-pointer font-bold"
+                      >
+                        <Database className="w-3.5 h-3.5 animate-pulse" />
+                        {isSeeding ? "Seeding..." : "Seed Demo"}
+                      </button>
+
+                      {telemetry.length > 0 && (
+                        <div className="flex items-center gap-1.5">
+                          {showClearConfirm ? (
+                            <>
+                              <button 
+                                onClick={() => setShowClearConfirm(false)}
+                                className="text-[10px] text-slate-400 hover:text-slate-300 font-bold transition px-2 py-1 border border-slate-700 bg-slate-900 rounded cursor-pointer"
+                              >
+                                Cancel
+                              </button>
+                              <button 
+                                onClick={handleClearLogs}
+                                className="text-[10px] text-white bg-red-600 hover:bg-red-500 font-bold transition flex items-center gap-1 border border-red-500 px-2.5 py-1 rounded animate-pulse cursor-pointer"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" /> Confirm Clear?
+                              </button>
+                            </>
+                          ) : (
                             <button 
                               onClick={handleClearLogs}
-                              className="text-[10px] text-white bg-red-600 hover:bg-red-500 font-bold transition flex items-center gap-1 border border-red-500 px-2.5 py-1 rounded animate-pulse cursor-pointer"
+                              className="text-[11px] text-red-400 hover:text-red-300 transition flex items-center gap-0.5 border border-red-500/20 px-2 py-1 bg-red-950/20 rounded cursor-pointer"
                             >
-                              <Trash2 className="w-3.5 h-3.5" /> Confirm Clear?
+                              <Trash2 className="w-3.5 h-3.5" /> Clear All
                             </button>
-                          </>
-                        ) : (
-                          <button 
-                            onClick={handleClearLogs}
-                            className="text-[11px] text-red-400 hover:text-red-300 transition flex items-center gap-0.5 border border-red-500/20 px-2 py-1 bg-red-950/20 rounded cursor-pointer"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" /> Clear All
-                          </button>
-                        )}
-                      </div>
-                    )}
+                          )}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
 
@@ -864,8 +895,26 @@ export default function App() {
                         </tr>
                       ) : filteredTelemetry.length === 0 ? (
                         <tr>
-                          <td colSpan={9} className="p-12 text-center text-slate-500">
-                            No telemetry logs matching filter found.
+                          <td colSpan={9} className="p-12 text-center text-slate-500 bg-slate-900/10">
+                            <div className="flex flex-col items-center gap-4 py-6 max-w-md mx-auto">
+                              <div className="p-3 bg-indigo-500/10 border border-indigo-500/20 rounded-full">
+                                <Database className="w-6 h-6 text-indigo-400" />
+                              </div>
+                              <div>
+                                <h3 className="text-slate-200 font-bold mb-1 font-sans text-xs uppercase tracking-wider">No Telemetry Logs Found</h3>
+                                <p className="text-[11px] text-slate-400 font-sans leading-relaxed">
+                                  There are currently no telemetry logs registered in database or memory. Click the button below to generate a beautiful, realistic 48-hour operational dataset across multiple cranes!
+                                </p>
+                              </div>
+                              <button
+                                onClick={handleSeedLogs}
+                                disabled={isSeeding}
+                                className="px-4 py-2 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 transition rounded-lg shadow-md cursor-pointer flex items-center gap-1.5"
+                              >
+                                <Database className="w-4 h-4 animate-pulse" />
+                                {isSeeding ? "Seeding Real-Time Datasets..." : "Seed High-Quality Demo Logs"}
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       ) : (
@@ -1285,7 +1334,7 @@ export default function App() {
                       Hoist Lifting Weight Profile & Thresholds
                     </h3>
                     <p className="text-[10px] text-slate-400 mt-1">
-                      Rolling real-time plot of hoist weights with crane-specific safety thresholds (D4: Main 63k / Aux 10k; Others: 73k).
+                      Rolling real-time plot of hoist weights with safety thresholds (Main: 63,000 kg / Aux: 10,000 kg).
                     </p>
                   </div>
                   {telemetry.some(t => {
