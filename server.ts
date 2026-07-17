@@ -57,6 +57,9 @@ interface CraneStats {
 
 let craneStatsMemory: Record<string, CraneStats> = {};
 
+// Keep track of seen telemetry IDs to prevent double processing when syncing MongoDB changes in real-time
+const seenTelemetryIds = new Set<string>();
+
 // Keep track of connected WS clients
 const clients = new Set<WebSocket>();
 
@@ -338,12 +341,23 @@ async function processTelemetryAndStats(data: any) {
       savedItem = { ...telemetryItem, _id: result.insertedId.toString() };
     } catch (err) {
       console.error("MongoDB telemetry insert failed, storing in memory instead:", err);
-      memoryTelemetry.unshift(telemetryItem);
-      savedItem = telemetryItem;
+      const mockId = "mem_" + Math.random().toString(36).substring(2, 11);
+      savedItem = { ...telemetryItem, _id: mockId };
+      memoryTelemetry.unshift(savedItem);
     }
   } else {
-    memoryTelemetry.unshift(telemetryItem);
-    savedItem = telemetryItem;
+    const mockId = "mem_" + Math.random().toString(36).substring(2, 11);
+    savedItem = { ...telemetryItem, _id: mockId };
+    memoryTelemetry.unshift(savedItem);
+  }
+
+  // Record this document ID as seen locally so the background MongoDB sync loop won't double-process it
+  if (savedItem && savedItem._id) {
+    seenTelemetryIds.add(savedItem._id);
+    if (seenTelemetryIds.size > 1500) {
+      const iterator = seenTelemetryIds.values();
+      seenTelemetryIds.delete(iterator.next().value);
+    }
   }
 
   // Broadcast to all active clients (WebSockets)
@@ -368,6 +382,127 @@ async function processTelemetryAndStats(data: any) {
 
   return savedItem;
 }
+
+// Automatically sync and process external MongoDB changes (e.g. from third-party receiver modules, other endpoints, or direct DB scripts)
+async function syncDatabaseChanges() {
+  if (!isMongoConnected || !mongoClient) return;
+  try {
+    const db = mongoClient.db();
+    // Fetch the 20 most recent telemetry records
+    const recentDocs = await db.collection("telemetry")
+      .find({})
+      .sort({ timestamp: -1 })
+      .limit(20)
+      .toArray();
+
+    const newDocsToProcess: any[] = [];
+    for (const doc of recentDocs) {
+      const docId = doc._id.toString();
+      if (!seenTelemetryIds.has(docId)) {
+        newDocsToProcess.push(doc);
+        seenTelemetryIds.add(docId);
+        if (seenTelemetryIds.size > 1500) {
+          const iterator = seenTelemetryIds.values();
+          seenTelemetryIds.delete(iterator.next().value);
+        }
+      }
+    }
+
+    // Process from oldest to newest of the new documents
+    newDocsToProcess.reverse();
+
+    for (const doc of newDocsToProcess) {
+      console.log("Detected external MongoDB insertion. Syncing and broadcasting:", doc);
+      
+      const craneId = String(
+        doc.craneId ?? 
+        doc.crane_id ?? 
+        doc.nodeId ?? 
+        doc.node_id ?? 
+        doc.id ?? 
+        doc.device ?? 
+        doc.deviceId ?? 
+        "ESP32_NODE"
+      ).trim();
+
+      const mainWeight = Number(doc.mainWeight ?? doc.mainHoistWeight ?? doc.main_weight ?? doc.weight ?? doc.MAIN_WT ?? doc.mainWt ?? 0);
+      const auxWeight = Number(doc.auxWeight ?? doc.auxHoistWeight ?? doc.aux_weight ?? doc.AUX_WT ?? doc.auxWt ?? 0);
+      const timestamp = doc.timestamp || new Date().toISOString();
+      const state = doc.state || "IDLE";
+
+      let stats = craneStatsMemory[craneId];
+      if (!stats) {
+        stats = {
+          craneId,
+          operatingHours: 0,
+          totalPackets: 0,
+          maxMainWeight: 0,
+          maxAuxWeight: 0,
+          lastActiveTimestamp: null,
+          lastState: "IDLE",
+        };
+        craneStatsMemory[craneId] = stats;
+      }
+
+      stats.totalPackets += 1;
+      if (mainWeight > stats.maxMainWeight) {
+        stats.maxMainWeight = mainWeight;
+      }
+      if (auxWeight > stats.maxAuxWeight) {
+        stats.maxAuxWeight = auxWeight;
+      }
+
+      if (stats.lastActiveTimestamp && timestamp) {
+        const lastTime = new Date(stats.lastActiveTimestamp).getTime();
+        const currTime = new Date(timestamp).getTime();
+        const diffHours = (currTime - lastTime) / (1000 * 60 * 60);
+        if (diffHours > 0 && diffHours < 1) {
+          stats.operatingHours += diffHours;
+        }
+      }
+      stats.lastActiveTimestamp = timestamp;
+      stats.lastState = state;
+
+      // Update in MongoDB
+      try {
+        await db.collection("crane_stats").updateOne(
+          { craneId },
+          { $set: stats },
+          { upsert: true }
+        );
+      } catch (err) {
+        console.error(`Failed to save synced crane stats for ${craneId}:`, err);
+      }
+
+      const formattedDoc = { ...doc, _id: doc._id.toString() };
+
+      // Broadcast to WebSockets
+      broadcast({
+        type: "TELEMETRY_UPDATE",
+        data: formattedDoc,
+        stats: Object.values(craneStatsMemory)
+      });
+
+      // Broadcast to SSE
+      broadcastSSE({
+        type: "TELEMETRY_UPDATE",
+        data: formattedDoc,
+        stats: Object.values(craneStatsMemory)
+      });
+
+      // Broadcast to Socket.io
+      io.emit("telemetry_update", {
+        data: formattedDoc,
+        stats: Object.values(craneStatsMemory)
+      });
+    }
+  } catch (err) {
+    console.error("Error in syncDatabaseChanges loop:", err);
+  }
+}
+
+// Start background database sync loop
+setInterval(syncDatabaseChanges, 1000);
 
 const getISTDateString = (dateObj: Date) => {
   try {
@@ -678,6 +813,7 @@ app.get("/api/telemetry/stream", (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no"); // Prevent proxy buffering
   res.flushHeaders();
 
   const client = { res };
@@ -813,8 +949,8 @@ async function startApp() {
         appType: "spa",
       });
       app.use((req, res, next) => {
-        if (req.url && (req.url.startsWith("/socket.io") || req.url.startsWith("/ws/telemetry"))) {
-          return;
+        if (req.url && (req.url.startsWith("/socket.io") || req.url.startsWith("/ws/telemetry") || req.url.startsWith("/api"))) {
+          return next();
         }
         vite.middlewares(req, res, next);
       });
@@ -831,7 +967,10 @@ async function startApp() {
     try {
       const distPath = path.join(process.cwd(), "dist");
       app.use(express.static(distPath));
-      app.get("*", (req, res) => {
+      app.get("*", (req, res, next) => {
+        if (req.path.startsWith("/api") || req.path.startsWith("/socket.io") || req.path.startsWith("/ws")) {
+          return next();
+        }
         res.sendFile(path.join(distPath, "index.html"));
       });
     } catch (err) {

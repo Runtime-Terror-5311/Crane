@@ -148,6 +148,7 @@ export default function App() {
 
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [highlightedRowId, setHighlightedRowId] = useState<string | null>(null);
 
   // Simulation test payload state
   const [isSendingTest, setIsSendingTest] = useState(false);
@@ -236,8 +237,10 @@ export default function App() {
 
     let ws: WebSocket | null = null;
     let sse: EventSource | null = null;
+    let socket: any = null;
     let wsReconnectTimeout: NodeJS.Timeout | null = null;
     let sseReconnectTimeout: NodeJS.Timeout | null = null;
+    let socketReconnectTimeout: NodeJS.Timeout | null = null;
     let isDisposed = false;
 
     // Unified message handler
@@ -263,6 +266,13 @@ export default function App() {
             setSelectedDate(packetDateStr);
           }
 
+          // Trigger a beautiful visual flash effect on the first three cells of this row
+          const uniqueId = `${newTelemetry.craneId}-${newTelemetry.timestamp}`;
+          setHighlightedRowId(uniqueId);
+          setTimeout(() => {
+            setHighlightedRowId((prev) => prev === uniqueId ? null : prev);
+          }, 3000);
+
           setTelemetry((prev) => {
             // Prevent duplicates
             if (prev.some(t => t.timestamp === newTelemetry.timestamp && t.craneId === newTelemetry.craneId)) {
@@ -286,7 +296,63 @@ export default function App() {
       }
     };
 
-    // 1. Establish WebSocket
+    // 1. Establish Socket.io
+    const connectSocketIO = () => {
+      if (isDisposed) return;
+      try {
+        console.log("Attempting Socket.io connection...");
+        socket = io(window.location.origin, {
+          path: "/socket.io",
+          transports: ["polling", "websocket"],
+          reconnectionDelay: 1000,
+          reconnectionDelayMax: 5000,
+          timeout: 20000
+        });
+
+        socket.on("connect", () => {
+          console.log("Socket.io connection established successfully!");
+          setWsConnected(true);
+          setError(null);
+        });
+
+        socket.on("disconnect", (reason: string) => {
+          console.warn("Socket.io connection disconnected:", reason);
+          const isOtherConnected = (ws && ws.readyState === WebSocket.OPEN) || (sse && sse.readyState === EventSource.OPEN);
+          if (!isOtherConnected) {
+            setWsConnected(false);
+          }
+        });
+
+        socket.on("connect_error", (err: any) => {
+          console.warn("Socket.io connection error. Trying fallback...", err);
+          const isOtherConnected = (ws && ws.readyState === WebSocket.OPEN) || (sse && sse.readyState === EventSource.OPEN);
+          if (!isOtherConnected) {
+            setWsConnected(false);
+          }
+        });
+
+        socket.on("initial_history", (history: any) => {
+          handleRealtimeMessage({ type: "INITIAL_HISTORY", history });
+        });
+
+        socket.on("initial_stats", (stats: any) => {
+          handleRealtimeMessage({ type: "INITIAL_STATS", stats });
+        });
+
+        socket.on("telemetry_update", (payload: any) => {
+          handleRealtimeMessage({ type: "TELEMETRY_UPDATE", data: payload.data, stats: payload.stats });
+        });
+
+        socket.on("telemetry_cleared", () => {
+          handleRealtimeMessage({ type: "TELEMETRY_CLEARED" });
+        });
+
+      } catch (err) {
+        console.error("Error setting up Socket.io connection:", err);
+      }
+    };
+
+    // 2. Establish WebSocket
     const connectWebSocket = () => {
       if (isDisposed) return;
       try {
@@ -304,7 +370,8 @@ export default function App() {
 
         ws.onclose = (event) => {
           console.warn(`WebSocket closed. Code: ${event.code}, Reason: ${event.reason}. Retrying connection...`);
-          if (!sse || sse.readyState !== EventSource.OPEN) {
+          const isOtherConnected = (socket && socket.connected) || (sse && sse.readyState === EventSource.OPEN);
+          if (!isOtherConnected) {
             setWsConnected(false);
           }
           if (!isDisposed) {
@@ -313,8 +380,9 @@ export default function App() {
         };
 
         ws.onerror = () => {
-          console.warn("WebSocket connection error. Relying on Server-Sent Events / polling fallbacks...");
-          if (!sse || sse.readyState !== EventSource.OPEN) {
+          console.warn("WebSocket connection error. Relying on Server-Sent Events / Socket.io / polling fallbacks...");
+          const isOtherConnected = (socket && socket.connected) || (sse && sse.readyState === EventSource.OPEN);
+          if (!isOtherConnected) {
             setWsConnected(false);
           }
         };
@@ -335,7 +403,7 @@ export default function App() {
       }
     };
 
-    // 2. Establish Server-Sent Events (SSE)
+    // 3. Establish Server-Sent Events (SSE)
     const connectSSE = () => {
       if (isDisposed) return;
       try {
@@ -350,7 +418,8 @@ export default function App() {
 
         sse.onerror = () => {
           console.warn("SSE connection closed or failed. Retrying SSE stream in 5s...");
-          if (!ws || ws.readyState !== WebSocket.OPEN) {
+          const isOtherConnected = (socket && socket.connected) || (ws && ws.readyState === WebSocket.OPEN);
+          if (!isOtherConnected) {
             setWsConnected(false);
           }
           if (sse) sse.close();
@@ -375,6 +444,7 @@ export default function App() {
       }
     };
 
+    connectSocketIO();
     connectWebSocket();
     connectSSE();
 
@@ -382,8 +452,10 @@ export default function App() {
       isDisposed = true;
       if (ws) ws.close();
       if (sse) sse.close();
+      if (socket) socket.disconnect();
       if (wsReconnectTimeout) clearTimeout(wsReconnectTimeout);
       if (sseReconnectTimeout) clearTimeout(sseReconnectTimeout);
+      if (socketReconnectTimeout) clearTimeout(socketReconnectTimeout);
     };
   }, []);
 
@@ -394,10 +466,12 @@ export default function App() {
     }
   }, [selectedDate]);
 
-  // Polling fallback if WebSocket & SSE are offline
+  // Polling / Sync check to ensure 100% data alignment even if socket/SSE has transient dropouts
   useEffect(() => {
     let pollTimer: NodeJS.Timeout | null = null;
-    if (!wsConnected && selectedDate) {
+    if (selectedDate) {
+      // Poll every 3 seconds if disconnected, or every 6 seconds as a background heartbeat if connected
+      const intervalMs = wsConnected ? 6000 : 3000;
       pollTimer = setInterval(async () => {
         try {
           // 1. Check if there's any newer telemetry in the database first (e.g. uploaded via REST or LoRa)
@@ -417,7 +491,7 @@ export default function App() {
         } catch (err) {
           console.warn("Polling interval failed to refresh telemetry:", err);
         }
-      }, 2000);
+      }, intervalMs);
     }
     return () => {
       if (pollTimer) clearInterval(pollTimer);
@@ -1080,6 +1154,9 @@ export default function App() {
                             stateBadgeClass = "bg-indigo-950 text-indigo-300 border border-indigo-800/40 font-bold";
                           }
 
+                          const uniqueId = `${item.craneId}-${item.timestamp}`;
+                          const isHighlighted = highlightedRowId === uniqueId;
+
                           return (
                             <tr
                               key={`${item.craneId}-${item.timestamp}-${index}`}
@@ -1091,8 +1168,10 @@ export default function App() {
                               }`}
                             >
                               {/* TIME COLUMN */}
-                              <td className="p-3 pl-4 text-slate-400 font-medium whitespace-nowrap">
-                                <span className="text-white font-bold block">
+                              <td className={`p-3 pl-4 text-slate-400 font-medium whitespace-nowrap transition-all duration-700 ${
+                                isHighlighted ? "bg-emerald-950/50 border-y border-emerald-500/30 animate-pulse text-emerald-300" : ""
+                              }`}>
+                                <span className={`font-bold block ${isHighlighted ? "text-emerald-200" : "text-white"}`}>
                                   {formatISTTime(item.timestamp)} <span className="text-[9px] text-indigo-400 font-normal">IST</span>
                                 </span>
                                 <span className="text-[10px] text-slate-500 block leading-tight mt-0.5">
@@ -1104,14 +1183,20 @@ export default function App() {
                               </td>
 
                               {/* DEVICE ID COLUMN */}
-                              <td className="p-3 font-bold text-white whitespace-nowrap">
-                                <span className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 font-bold">
+                              <td className={`p-3 font-bold text-white whitespace-nowrap transition-all duration-700 ${
+                                isHighlighted ? "bg-emerald-950/50 border-y border-emerald-500/30" : ""
+                              }`}>
+                                <span className={`px-1.5 py-0.5 rounded border font-bold ${
+                                  isHighlighted ? "bg-emerald-900/50 border-emerald-500/50 text-emerald-200" : "bg-slate-900 border-slate-800"
+                                }`}>
                                   {item.craneId}
                                 </span>
                               </td>
 
                               {/* STATE COLUMN */}
-                              <td className="p-3 whitespace-nowrap">
+                              <td className={`p-3 whitespace-nowrap transition-all duration-700 ${
+                                isHighlighted ? "bg-emerald-950/50 border-y border-emerald-500/30" : ""
+                              }`}>
                                 <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold uppercase ${stateBadgeClass}`}>
                                   {isOverloaded ? "OVERLOAD" : (item.state || "IDLE")}
                                 </span>
