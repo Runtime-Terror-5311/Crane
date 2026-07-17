@@ -97,6 +97,16 @@ wss.on("connection", (ws) => {
     stats: Object.values(craneStatsMemory)
   }));
 
+  // Send initial history on connection
+  getTelemetry().then((history) => {
+    ws.send(JSON.stringify({
+      type: "INITIAL_HISTORY",
+      history: history
+    }));
+  }).catch((err) => {
+    console.error("Failed to load initial history for WebSocket client:", err);
+  });
+
   ws.on("error", (err) => {
     console.error("WebSocket client connection error:", err);
   });

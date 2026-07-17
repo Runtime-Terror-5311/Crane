@@ -234,75 +234,107 @@ export default function App() {
 
     initTelemetry();
 
-    // Establish Socket.io connection using current host, forcing direct WebSocket transport
-    // to bypass the stateful HTTP long-polling stage, which fails behind stateless reverse proxies.
-    const socket = io(window.location.origin, {
-      path: "/socket.io",
-      transports: ["websocket"],
-      upgrade: false,
-      reconnectionAttempts: 20,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 5000,
-      timeout: 20000
-    });
+    let ws: WebSocket | null = null;
+    let reconnectTimeout: NodeJS.Timeout | null = null;
+    let isDisposed = false;
 
-    socket.on("connect", () => {
-      console.log("Socket.io telemetry stream established successfully!");
-      setWsConnected(true);
-      setError(null);
-    });
+    const connectWebSocket = () => {
+      if (isDisposed) return;
 
-    socket.on("initial_history", (history: CraneTelemetry[]) => {
-      if (history && history.length > 0) {
-        setTelemetry((prev) => prev.length === 0 ? history : prev);
-      }
-    });
+      try {
+        const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        const wsUrl = `${wsProtocol}//${window.location.host}/ws/telemetry`;
+        console.log("Attempting native WebSocket connection to:", wsUrl);
 
-    socket.on("initial_stats", (stats: CraneStats[]) => {
-      if (stats) setCraneStats(stats);
-    });
+        ws = new WebSocket(wsUrl);
 
-    socket.on("telemetry_update", (message: { data: CraneTelemetry; stats?: CraneStats[] }) => {
-      const newTelemetry = message.data;
-      const packetDateStr = getISTDateString(new Date(newTelemetry.timestamp));
-      const currentSelectedDate = selectedDateRef.current;
+        ws.onopen = () => {
+          console.log("Native WebSocket telemetry stream established successfully!");
+          setWsConnected(true);
+          setError(null);
+        };
 
-      // Auto-switch to the incoming packet's date so it immediately shows on the dashboard
-      if (currentSelectedDate && packetDateStr !== currentSelectedDate) {
-        setSelectedDate(packetDateStr);
-      }
+        ws.onclose = (event) => {
+          console.warn(`WebSocket closed. Code: ${event.code}, Reason: ${event.reason}. Retrying connection...`);
+          setWsConnected(false);
+          if (!isDisposed) {
+            reconnectTimeout = setTimeout(connectWebSocket, 3000);
+          }
+        };
 
-      setTelemetry((prev) => {
-        // Prevent duplicates
-        if (prev.some(t => t.timestamp === newTelemetry.timestamp && t.craneId === newTelemetry.craneId)) {
-          return prev;
+        ws.onerror = () => {
+          // Softly handle connection errors since the fallback polling system will manage updates.
+          console.warn("WebSocket connection was not established (this is expected if running behind certain sandboxed proxies/iframes). Activating fallback polling mode...");
+          setWsConnected(false);
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const message = JSON.parse(event.data);
+            switch (message.type) {
+              case "INITIAL_HISTORY":
+                if (message.history && message.history.length > 0) {
+                  setTelemetry((prev) => prev.length === 0 ? message.history : prev);
+                }
+                break;
+              case "INITIAL_STATS":
+                if (message.stats) {
+                  setCraneStats(message.stats);
+                }
+                break;
+              case "TELEMETRY_UPDATE": {
+                const newTelemetry = message.data;
+                const packetDateStr = getISTDateString(new Date(newTelemetry.timestamp));
+                const currentSelectedDate = selectedDateRef.current;
+
+                // Auto-switch to the incoming packet's date so it immediately shows on the dashboard
+                if (currentSelectedDate && packetDateStr !== currentSelectedDate) {
+                  setSelectedDate(packetDateStr);
+                }
+
+                setTelemetry((prev) => {
+                  // Prevent duplicates
+                  if (prev.some(t => t.timestamp === newTelemetry.timestamp && t.craneId === newTelemetry.craneId)) {
+                    return prev;
+                  }
+                  return [newTelemetry, ...prev];
+                });
+
+                if (message.stats) {
+                  setCraneStats(message.stats);
+                }
+                break;
+              }
+              case "TELEMETRY_CLEARED":
+                setTelemetry([]);
+                setCraneStats([]);
+                setSelectedItem(null);
+                break;
+              default:
+                break;
+            }
+          } catch (jsonErr) {
+            console.error("Failed to parse WebSocket message:", jsonErr);
+          }
+        };
+      } catch (connErr) {
+        console.error("Error setting up WebSocket:", connErr);
+        if (!isDisposed) {
+          reconnectTimeout = setTimeout(connectWebSocket, 3000);
         }
-        return [newTelemetry, ...prev];
-      });
-
-      if (message.stats) {
-        setCraneStats(message.stats);
       }
-    });
+    };
 
-    socket.on("telemetry_cleared", () => {
-      setTelemetry([]);
-      setCraneStats([]);
-      setSelectedItem(null);
-    });
-
-    socket.on("disconnect", (reason) => {
-      console.warn("Socket.io link disconnected. Reason:", reason);
-      setWsConnected(false);
-    });
-
-    socket.on("connect_error", (err) => {
-      console.warn("Socket.io connect_error:", err);
-      setWsConnected(false);
-    });
+    connectWebSocket();
 
     return () => {
-      socket.disconnect();
+      isDisposed = true;
+      if (ws) {
+        ws.close();
+      }
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+      }
     };
   }, []);
 
@@ -733,7 +765,7 @@ export default function App() {
                 : "bg-amber-950/40 border-amber-500/40 text-amber-400"
             }`}>
               {wsConnected ? <Wifi className="w-3.5 h-3.5" /> : <WifiOff className="w-3.5 h-3.5 animate-pulse" />}
-              <span>Socket.io: {wsConnected ? "CONNECTED" : "FALLBACK POLLING"}</span>
+              <span>WebSockets: {wsConnected ? "CONNECTED" : "FALLBACK POLLING"}</span>
             </div>
 
             <div 
