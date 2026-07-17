@@ -736,13 +736,33 @@ export default function App() {
               <span>Socket.io: {wsConnected ? "CONNECTED" : "FALLBACK POLLING"}</span>
             </div>
 
-            <div className={`px-2.5 py-1.5 rounded-full border flex items-center gap-1.5 font-bold ${
-              config?.mongodbConnected
-                ? "bg-indigo-950/40 border-indigo-500/40 text-indigo-300"
-                : "bg-slate-900 border-slate-800 text-slate-400"
-            }`}>
+            <div 
+              title={config?.mongodbConnected ? `Connected to Database: ${config.databaseName}` : `Ephemeral storage active. Reason: ${config?.mongoConnectionError || 'Not connected'}`}
+              className={`px-2.5 py-1.5 rounded-full border flex items-center gap-1.5 font-bold transition-all relative group cursor-help ${
+                config?.mongodbConnected
+                  ? "bg-emerald-950/40 border-emerald-500/40 text-emerald-400"
+                  : "bg-amber-950/30 border-amber-500/30 text-amber-500"
+              }`}
+            >
               <Database className="w-3.5 h-3.5" />
-              <span>DB: {config?.mongodbConnected ? `MongoDB (${config.databaseName})` : "Local In-Memory"}</span>
+              <span>DB: {config?.mongodbConnected ? `MongoDB (${config.databaseName})` : "Local Ephemeral"}</span>
+              
+              {!config?.mongodbConnected && (
+                <div className="absolute top-full mt-2 right-0 hidden group-hover:flex flex-col bg-slate-900 border border-slate-800 p-3 rounded-lg w-72 shadow-xl z-50 text-slate-300 font-sans font-normal leading-normal whitespace-normal">
+                  <div className="text-[10px] font-bold text-amber-500 uppercase tracking-wider mb-1">Persistent Storage Alert</div>
+                  <p className="text-[11px] mb-1.5">
+                    Data is currently saved in **ephemeral server memory** and will be lost when the deployed container restarts (typical on Cloud Run scale-to-zero).
+                  </p>
+                  <p className="text-[11px] text-slate-400">
+                    <span className="font-semibold text-white">To persist data:</span> configure the <code className="bg-slate-950 px-1 py-0.5 rounded text-indigo-400 font-mono">MONGODB_URI</code> environment variable in your deployment settings.
+                  </p>
+                  {config?.mongoConnectionError && (
+                    <div className="mt-2 pt-1.5 border-t border-slate-800 text-[10px] text-red-400 font-mono break-all">
+                      Error: {config.mongoConnectionError}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         </div>

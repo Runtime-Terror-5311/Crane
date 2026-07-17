@@ -25,6 +25,7 @@ export interface AppConfig {
   databaseName: string;
   serverUrl: string;
   wsUrl?: string; // WebSocket connection URL
+  mongoConnectionError?: string;
 }
 
 export interface CraneStats {

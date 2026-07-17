@@ -122,10 +122,24 @@ const mongoUri = process.env.MONGODB_URI || "";
 let mongoClient: MongoClient | null = null;
 let isMongoConnected = false;
 let dbName = "Local In-Memory Database";
+let mongoConnectionError = "";
+
+// Initialize descriptive connection error message
+if (!mongoUri) {
+  mongoConnectionError = "MONGODB_URI environment variable is empty or missing.";
+} else if (mongoUri.includes("MY_MONGODB_URI") || mongoUri.includes("username:password")) {
+  mongoConnectionError = "MONGODB_URI contains default placeholder values ('MY_MONGODB_URI' or 'username:password').";
+} else {
+  mongoConnectionError = "Attempting connection...";
+}
 
 async function connectMongo() {
-  if (!mongoUri || mongoUri.includes("MY_MONGODB_URI") || mongoUri.includes("username:password")) {
-    console.log("No valid MONGODB_URI detected in environment variables. Falling back to robust in-memory store.");
+  if (!mongoUri) {
+    console.log("No MONGODB_URI detected in environment variables. Falling back to robust in-memory store.");
+    return;
+  }
+  if (mongoUri.includes("MY_MONGODB_URI") || mongoUri.includes("username:password")) {
+    console.log("Placeholder MONGODB_URI detected in environment variables. Falling back to robust in-memory store.");
     return;
   }
   try {
@@ -134,13 +148,15 @@ async function connectMongo() {
     await mongoClient.connect();
     isMongoConnected = true;
     dbName = mongoClient.db().databaseName || "crane_telemetry";
+    mongoConnectionError = "";
     console.log(`Successfully connected to MongoDB! Database name: ${dbName}`);
     
     // Load historical stats
     await loadStats();
-  } catch (err) {
+  } catch (err: any) {
     console.error("Failed to connect to MongoDB, falling back to in-memory store. Error:", err);
     isMongoConnected = false;
+    mongoConnectionError = err.message || String(err);
   }
 }
 
@@ -322,10 +338,32 @@ async function processTelemetryAndStats(data: any) {
   return savedItem;
 }
 
+const getISTDateString = (dateObj: Date) => {
+  try {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Kolkata',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    }).format(dateObj);
+  } catch (e) {
+    const year = dateObj.getUTCFullYear();
+    const month = String(dateObj.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(dateObj.getUTCDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
+};
+
 function filterMemoryTelemetry(date?: string, limit?: number) {
   let items = [...memoryTelemetry];
   if (date) {
-    items = items.filter(item => item.timestamp && item.timestamp.startsWith(date));
+    items = items.filter(item => {
+      try {
+        return item.timestamp && getISTDateString(new Date(item.timestamp)) === date;
+      } catch (e) {
+        return item.timestamp && item.timestamp.startsWith(date);
+      }
+    });
   }
   if (limit) {
     items = items.slice(0, limit);
@@ -339,7 +377,13 @@ async function getTelemetry(date?: string, limit?: number) {
       const db = mongoClient.db();
       const query: any = {};
       if (date) {
-        query.timestamp = { $regex: `^${date}` };
+        try {
+          const startUtcStr = new Date(`${date}T00:00:00+05:30`).toISOString();
+          const endUtcStr = new Date(`${date}T23:59:59.999+05:30`).toISOString();
+          query.timestamp = { $gte: startUtcStr, $lte: endUtcStr };
+        } catch (e) {
+          query.timestamp = { $regex: `^${date}` };
+        }
       }
       
       let cursor = db.collection("telemetry")
@@ -616,7 +660,8 @@ app.get("/api/config", (req, res) => {
     mongodbConnected: isMongoConnected,
     databaseName: dbName,
     serverUrl: `${hostUrl}/api/crane`,
-    wsUrl: wsUrl
+    wsUrl: wsUrl,
+    mongoConnectionError: mongoConnectionError
   });
 });
 
