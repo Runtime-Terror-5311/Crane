@@ -303,7 +303,7 @@ export default function App() {
         console.log("Attempting Socket.io connection...");
         socket = io(window.location.origin, {
           path: "/socket.io",
-          transports: ["polling", "websocket"],
+          transports: ["websocket", "polling"],
           reconnectionDelay: 1000,
           reconnectionDelayMax: 5000,
           timeout: 20000

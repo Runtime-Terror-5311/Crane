@@ -34,9 +34,7 @@ server.on("upgrade", (request, socket, head) => {
     wss.handleUpgrade(request, socket, head, (ws) => {
       wss.emit("connection", ws, request);
     });
-  } else {
-    // If it's another upgrade (e.g., Vite HMR), do not destroy the socket and let it bubble/be handled by other handlers
-  }
+  } 
 });
 
 app.use(express.json());
@@ -69,7 +67,9 @@ const io = new SocketIOServer(server, {
     origin: "*",
     methods: ["GET", "POST"]
   },
-  path: "/socket.io"
+  path: "/socket.io",
+  transports: ["websocket", "polling"]   // ← add this line
+
 });
 
 io.on("connection", (socket) => {
@@ -735,15 +735,15 @@ async function seedDemoData() {
         stats.lastState = state;
 
         if (isMongoConnected && mongoClient) {
-          try {
-            const db = mongoClient.db();
-            await db.collection("telemetry").insertOne(telemetryItem);
-          } catch (err) {
-            memoryTelemetry.push(telemetryItem);
-          }
-        } else {
-          memoryTelemetry.push(telemetryItem);
-        }
+  try {
+    const db = mongoClient.db();
+    const result = await db.collection("telemetry").insertOne(telemetryItem);
+    // ← Add this to prevent syncDatabaseChanges from re-broadcasting seed data
+    seenTelemetryIds.add(result.insertedId.toString());
+  } catch (err) {
+    memoryTelemetry.push(telemetryItem);
+  }
+}
       }
     }
   }
