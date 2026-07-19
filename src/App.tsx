@@ -138,6 +138,7 @@ export default function App() {
   });
   
   const selectedDateRef = useRef(selectedDate);
+  const userSelectedDateRef = useRef(false);
   useEffect(() => {
     selectedDateRef.current = selectedDate;
   }, [selectedDate]);
@@ -221,7 +222,9 @@ export default function App() {
         const data = await fetchJsonWithRetry("/api/crane", {}, 5, 1000);
         if (data && data.length > 0) {
           const latestDate = getISTDateString(new Date(data[0].timestamp));
-          setSelectedDate(latestDate);
+if (!userSelectedDateRef.current) {
+  setSelectedDate(latestDate);
+}
         } else {
           await fetchLogs(false, selectedDate);
         }
@@ -262,9 +265,9 @@ export default function App() {
           const currentSelectedDate = selectedDateRef.current;
 
           // Auto-switch to the incoming packet's date so it immediately shows on the dashboard
-          if (currentSelectedDate && packetDateStr !== currentSelectedDate) {
-            setSelectedDate(packetDateStr);
-          }
+          if (!userSelectedDateRef.current && currentSelectedDate && packetDateStr !== currentSelectedDate) {
+  setSelectedDate(packetDateStr);
+}
 
           // Trigger a beautiful visual flash effect on the first three cells of this row
           const uniqueId = `${newTelemetry.craneId}-${newTelemetry.timestamp}`;
@@ -478,11 +481,10 @@ export default function App() {
           const latestData = await fetchJsonWithRetry("/api/crane?limit=1", {}, 1, 300);
           if (latestData && latestData.length > 0) {
             const latestDateInDb = getISTDateString(new Date(latestData[0].timestamp));
-            if (latestDateInDb > selectedDate) {
-              // A newer date has been uploaded! Switch to it.
-              setSelectedDate(latestDateInDb);
-              return; // The selectedDate change will trigger fetchLogs for the new date automatically
-            }
+            if (!userSelectedDateRef.current && latestDateInDb > selectedDate) {
+  setSelectedDate(latestDateInDb);
+  return;
+}
           }
           
           // 2. Standard polling updates for the currently selected date
@@ -1041,7 +1043,10 @@ export default function App() {
                       <input 
                         type="date" 
                         value={selectedDate} 
-                        onChange={(e) => setSelectedDate(e.target.value)}
+                        onChange={(e) => {
+  userSelectedDateRef.current = true;
+  setSelectedDate(e.target.value);
+}}
                         className="bg-transparent text-[11px] font-bold text-indigo-300 focus:outline-none cursor-pointer [color-scheme:dark]"
                       />
                     </div>
@@ -1437,7 +1442,10 @@ export default function App() {
                     <input 
                       type="date" 
                       value={selectedDate} 
-                      onChange={(e) => setSelectedDate(e.target.value)}
+                      onChange={(e) => {
+  userSelectedDateRef.current = true;
+  setSelectedDate(e.target.value);
+}}
                       className="bg-transparent text-[11px] font-bold text-indigo-300 focus:outline-none cursor-pointer [color-scheme:dark]"
                     />
                   </div>
