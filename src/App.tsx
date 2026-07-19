@@ -993,14 +993,14 @@ if (!userSelectedDateRef.current) {
                       </select>
                     </div>
                     <div className="flex items-center gap-2">
-                      <button 
+                      {/* <button 
                         onClick={handleSeedLogs}
                         disabled={isSeeding}
                         className="text-[11px] text-indigo-400 hover:text-indigo-300 disabled:opacity-50 transition flex items-center gap-1 border border-indigo-500/20 px-2.5 py-1 bg-indigo-950/20 rounded cursor-pointer font-bold"
                       >
                         <Database className="w-3.5 h-3.5 animate-pulse" />
                         {isSeeding ? "Seeding..." : "Seed Demo"}
-                      </button>
+                      </button> */}
 
                       {telemetry.length > 0 && (
                         <div className="flex items-center gap-1.5">
@@ -1119,28 +1119,13 @@ if (!userSelectedDateRef.current) {
                         </tr>
                       ) : filteredTelemetry.length === 0 ? (
                         <tr>
-                          <td colSpan={9} className="p-12 text-center text-slate-500 bg-slate-900/10">
-                            <div className="flex flex-col items-center gap-4 py-6 max-w-md mx-auto">
-                              <div className="p-3 bg-indigo-500/10 border border-indigo-500/20 rounded-full">
-                                <Database className="w-6 h-6 text-indigo-400" />
-                              </div>
-                              <div>
-                                <h3 className="text-slate-200 font-bold mb-1 font-sans text-xs uppercase tracking-wider">No Telemetry Logs Found</h3>
-                                <p className="text-[11px] text-slate-400 font-sans leading-relaxed">
-                                  There are currently no telemetry logs registered in database or memory. Click the button below to generate a beautiful, realistic 48-hour operational dataset across multiple cranes!
-                                </p>
-                              </div>
-                              <button
-                                onClick={handleSeedLogs}
-                                disabled={isSeeding}
-                                className="px-4 py-2 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 transition rounded-lg shadow-md cursor-pointer flex items-center gap-1.5"
-                              >
-                                <Database className="w-4 h-4 animate-pulse" />
-                                {isSeeding ? "Seeding Real-Time Datasets..." : "Seed High-Quality Demo Logs"}
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
+    <td colSpan={9} className="p-12 text-center text-slate-500 bg-slate-900/10">
+      <div className="flex flex-col items-center gap-3 py-6">
+        <RefreshCw className="w-5 h-5 text-slate-600" />
+        <span className="text-xs text-slate-500 font-mono">No packets found for the selected date / time range.</span>
+      </div>
+    </td>
+  </tr>
                       ) : (
                         filteredTelemetry.map((item, index) => {
                           // Check if this item is active
